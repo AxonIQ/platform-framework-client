@@ -31,14 +31,14 @@
     </modules>
     <packaging>pom</packaging>
 
-    <name>AxonIQ Console - Framework Client</name>
-    <description>Project containing the Framework Client for AxonIQ Console</description>
+    <name>Axoniq Platform Framework client parent</name>
+    <description>Axoniq Platform instrumentation and client for Axon Framework 5. https://platform.axoniq.io</description>
 
     <inceptionYear>2023</inceptionYear>
     <url>https://axoniq.io/</url>
     <issueManagement>
         <system>GitHub</system>
-        <url>https://github.com/AxonIQ/console-framework-client/issues</url>
+        <url>https://github.com/AxonIQ/platform-framework-client/issues</url>
     </issueManagement>
     <licenses>
         <license>
@@ -219,22 +219,13 @@
     </build>
 
     <scm>
-        <connection>scm:git:git://github.com/AxonIQ/console-framework-client.git</connection>
-        <developerConnection>scm:git:git@github.com:AxonIQ/console-framework-client.git</developerConnection>
-        <url>https://github.com/AxonIQ/console-framework-client</url>
+        <connection>scm:git:git://github.com/AxonIQ/platform-framework-client.git</connection>
+        <developerConnection>scm:git:git@github.com:AxonIQ/platform-framework-client.git</developerConnection>
+        <url>https://github.com/AxonIQ/platform-framework-client</url>
         <tag>HEAD</tag>
     </scm>
 
     <developers>
-        <developer>
-            <name>Gerard Klijs</name>
-            <email>gerard.klijs@axoniq.io</email>
-            <organization>AxonIQ</organization>
-            <organizationUrl>https://axoniq.io</organizationUrl>
-            <roles>
-                <role>Developer</role>
-            </roles>
-        </developer>
         <developer>
             <name>Mitchell Herrijgers</name>
             <email>mitchell.herrijgers@axoniq.io</email>
@@ -374,8 +365,10 @@
                                     <goal>sign</goal>
                                 </goals>
                                 <configuration>
-                                    <keyname>AA9DC051550F7897</keyname>
-                                    <useAgent>true</useAgent>
+                                    <gpgArguments>
+                                        <arg>--pinentry-mode</arg>
+                                        <arg>loopback</arg>
+                                    </gpgArguments>
                                 </configuration>
                             </execution>
                         </executions>

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2024. AxonIQ B.V.
+ * Copyright (c) 2022-2025. AxonIQ B.V.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,6 @@ import reactor.core.publisher.Mono
 import reactor.netty.tcp.TcpClient
 import java.time.Instant
 import java.time.temporal.ChronoUnit
-import java.util.*
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -79,6 +78,7 @@ class AxoniqConsoleRSocketClient(
     private var lastConnectionTry = Instant.EPOCH
     private var connectionRetryCount = 0
     private var pausedReports = false
+    private var supressConnectMessage = false
 
     init {
         clientSettingsService.subscribeToSettings(heartbeatOrchestrator)
@@ -166,16 +166,20 @@ class AxoniqConsoleRSocketClient(
             rsocket = createRSocket()
             // Fetch the client settings from the server
             val settings = retrieveSettings().block()
-                    ?: throw IllegalStateException("Could not receive the settings from AxonIQ console!")
+                    ?: throw IllegalStateException("Could not receive the settings from Axoniq Platform!")
             clientSettingsService.updateSettings(settings)
-            logger.info("Connection to AxonIQ Console set up successfully! This instance's name: $instanceName, settings: $settings")
+            if (!supressConnectMessage) {
+                logger.info("Connection to Axoniq Platform set up successfully! This instance's name: $instanceName, settings: $settings")
+                supressConnectMessage = true
+            }
             connectionRetryCount = 0
         } catch (e: Exception) {
-            if (connectionRetryCount == 5) {
-                logger.error("Failed to connect to AxonIQ Console. Error: ${e.message}. Will keep trying to connect...")
+            if (connectionRetryCount == 10) {
+                logger.error("Failed to connect to Axoniq Platform. Error: ${e.message}. Will keep trying to connect...")
+                supressConnectMessage = false
             }
             disposeCurrentConnection()
-            logger.debug("Failed to connect to AxonIQ Console", e)
+            logger.debug("Failed to connect to Axoniq Platform", e)
         }
     }
 
@@ -258,7 +262,7 @@ class AxoniqConsoleRSocketClient(
 
         init {
             registrar.registerHandlerWithoutPayload(Routes.Management.HEARTBEAT) {
-                logger.debug("Received heartbeat from AxonIQ Console. Last one was: {}", lastReceivedHeartbeat)
+                logger.debug("Received heartbeat from Axoniq Platform. Last one was: {}", lastReceivedHeartbeat)
                 lastReceivedHeartbeat = Instant.now()
                 lastReceivedHeartbeat
             }
@@ -283,14 +287,13 @@ class AxoniqConsoleRSocketClient(
         }
 
         override fun onDisconnected() {
-            logger.info("This application has lost it's connection to AxonIQ Console. Reconnection will be automatically attempted.")
             this.heartbeatSendTask?.cancel(true)
             this.heartbeatCheckTask?.cancel(true)
         }
 
         private fun checkHeartbeats(heartbeatTimeout: Long) {
             if (lastReceivedHeartbeat < Instant.now().minusMillis(heartbeatTimeout)) {
-                logger.debug("Haven't received a heartbeat for {} seconds from AxonIQ Console. Reconnecting...", ChronoUnit.SECONDS.between(lastReceivedHeartbeat, Instant.now()))
+                logger.debug("Haven't received a heartbeat for {} seconds from Axoniq Platform. Reconnecting...", ChronoUnit.SECONDS.between(lastReceivedHeartbeat, Instant.now()))
                 disposeCurrentConnection()
             }
         }
@@ -299,7 +302,7 @@ class AxoniqConsoleRSocketClient(
             return rsocket
                     ?.requestResponse(encodingStrategy.encode("", createRoutingMetadata(Routes.Management.HEARTBEAT)))
                     ?.doOnSuccess {
-                        logger.debug("Heartbeat successfully sent to AxonIQ Console")
+                        logger.debug("Heartbeat successfully sent to Axoniq Platform")
                     }
                     ?: Mono.empty()
         }
@@ -313,7 +316,7 @@ class AxoniqConsoleRSocketClient(
                 }
                 .doOnError {
                     if (it.message?.contains("Access Denied") == true) {
-                        logger.error("Was unable to send call to AxonIQ Console since authentication was incorrect!")
+                        logger.error("Was unable to send call to Axoniq Platformsince authentication was incorrect!")
                     }
                 }
     }
