@@ -316,7 +316,7 @@ class AxoniqConsoleRSocketClient(
                 }
                 .doOnError {
                     if (it.message?.contains("Access Denied") == true) {
-                        logger.error("Was unable to send call to Axoniq Platformsince authentication was incorrect!")
+                        logger.error("Was unable to send call to Axoniq Platform since authentication was incorrect!")
                     }
                 }
     }
