@@ -26,8 +26,8 @@
     <modelVersion>4.0.0</modelVersion>
 
     <artifactId>console-framework-client-api</artifactId>
-    <name>AxonIQ Console Framework Client API</name>
-    <description>API module for the AxonIQ Console Framework Client</description>
+    <name>Axoniq Platform Framework Client API</name>
+    <description>API module for the Axoniq Platform Framework Client</description>
 
     <dependencies>
         <dependency>

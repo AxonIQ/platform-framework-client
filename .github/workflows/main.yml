@@ -4,12 +4,12 @@ on:
   push:
     branches:
       - main
+      - axon-4
 
 jobs:
   build:
     name: Test and Build on JDK ${{ matrix.java-version }}
     runs-on: ubuntu-latest
-    continue-on-error: true # do not fail the whole job if one of the steps fails
 
     strategy:
       matrix:
@@ -23,11 +23,6 @@ jobs:
           - java-version: 17
             sonar-enabled: true
             deploy-enabled: false
-# Disabled due to https://youtrack.jetbrains.com/issue/KT-62389/JDK-21-Cannot-access-class-TimeUnit.-Check-your-module-classpath-for-missing-or-conflicting-dependencies
-# Still runs perfectly fine on 21, just doesn't compile
-#          - java-version: 21
-#            sonar-enabled: false
-#            deploy-enabled: false
 
     steps:
       - name: Checkout Code
@@ -42,8 +37,14 @@ jobs:
           server-id: central
           server-username: MAVEN_USERNAME
           server-password: MAVEN_PASSWORD
-          gpg-private-key: ${{ secrets.SONATYPE_GPG_KEY }} # Value of the GPG private key to import
-          gpg-passphrase: ${{ secrets.SONATYPE_GPG_PASSWORD }}
+
+      - name: Import GPG key
+        if: matrix.deploy-enabled
+        run: |
+          echo "${{ secrets.SONATYPE_GPG_KEY }}" | base64 --decode | gpg --batch --import
+          gpg --list-secret-keys --keyid-format LONG
+        env:
+          GPG_TTY: $(tty)
 
       - name: Test and Build
         if: ${{ !matrix.sonar-enabled }}
@@ -65,7 +66,7 @@ jobs:
       - name: Deploy to Sonatype
         if: matrix.deploy-enabled
         run: |
-          ./mvnw -B -U -Dstyle.color=always -Prelease deploy -DskipTests=true
+          ./mvnw -B -U -Dstyle.color=always -Prelease -Psign deploy -DskipTests=true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MAVEN_USERNAME: ${{ secrets.SONATYPE_TOKEN_ID }}
