@@ -50,7 +50,15 @@ class ApplicationMetricReporter(
     }
 
     private fun report() {
-        client.sendReport(io.axoniq.console.framework.api.Routes.Application.REPORT, reportCreator.createReport()).block()
+        if (!client.isConnected()) {
+            return
+        }
+        client.sendReport(io.axoniq.console.framework.api.Routes.Application.REPORT, reportCreator.createReport())
+            .doOnError { e ->
+                logger.debug { "Failed to send application report: ${e.message}" }
+            }
+            .onErrorComplete()
+            .subscribe()
     }
 
     override fun onDisconnected() {

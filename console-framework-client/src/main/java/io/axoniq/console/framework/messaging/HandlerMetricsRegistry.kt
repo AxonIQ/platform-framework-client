@@ -59,12 +59,20 @@ class HandlerMetricsRegistry(
     override fun onConnectedWithSettings(settings: ClientSettingsV2) {
         logger.debug { "Sending handler information every ${settings.handlerReportInterval}ms to AxonIQ console" }
         this.reportTask = executor.scheduleAtFixedRate({
+            if (!axoniqConsoleRSocketClient.isConnected()) {
+                return@scheduleAtFixedRate
+            }
             try {
                 val stats = getStats()
-                logger.debug("Sending metrics: {}", stats)
-                axoniqConsoleRSocketClient.sendReport(io.axoniq.console.framework.api.Routes.MessageFlow.STATS, stats).block()
+                logger.debug { "Sending metrics: $stats" }
+                axoniqConsoleRSocketClient.sendReport(io.axoniq.console.framework.api.Routes.MessageFlow.STATS, stats)
+                    .doOnError { e ->
+                        logger.debug { "Failed to send handler metrics: ${e.message}" }
+                    }
+                    .onErrorComplete()
+                    .subscribe()
             } catch (e: Exception) {
-                logger.warn("No metrics could be reported to AxonIQ Console: {}", e.message)
+                logger.warn { "No metrics could be reported to AxonIQ Console: ${e.message}" }
             }
         }, 0, settings.handlerReportInterval, TimeUnit.MILLISECONDS)
     }
