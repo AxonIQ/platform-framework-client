@@ -48,7 +48,15 @@ class ServerProcessorReporter(
     }
 
     private fun report() {
-        client.sendReport(io.axoniq.console.framework.api.Routes.EventProcessor.REPORT, processorReportCreator.createReport()).block()
+        if (!client.isConnected()) {
+            return
+        }
+        client.sendReport(io.axoniq.console.framework.api.Routes.EventProcessor.REPORT, processorReportCreator.createReport())
+            .doOnError { e ->
+                logger.debug { "Failed to send processor report: ${e.message}" }
+            }
+            .onErrorComplete()
+            .subscribe()
     }
 
     override fun onDisconnected() {

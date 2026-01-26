@@ -40,6 +40,8 @@ import java.time.temporal.ChronoUnit
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import kotlin.math.pow
 
 /**
@@ -74,10 +76,11 @@ class AxoniqConsoleRSocketClient(
     private var maintenanceTask: ScheduledFuture<*>? = null
     private val logger = LoggerFactory.getLogger(this::class.java)
 
-    private var rsocket: RSocket? = null
+    private val connectionLock = ReentrantLock()
+    @Volatile private var rsocket: RSocket? = null
     private var lastConnectionTry = Instant.EPOCH
     private var connectionRetryCount = 0
-    private var pausedReports = false
+    @Volatile private var pausedReports = false
     private var supressConnectMessage = false
 
     init {
@@ -239,10 +242,20 @@ class AxoniqConsoleRSocketClient(
 
     fun isConnected() = rsocket != null
 
+    /**
+     * Disposes the current RSocket connection in a thread-safe manner.
+     * This method can be called from multiple threads (e.g., TCP disconnect callback,
+     * heartbeat checker), but will only perform the disposal once per connection.
+     */
     fun disposeCurrentConnection() {
-        rsocket?.dispose()
-        rsocket = null
-        clientSettingsService.clearSettings()
+        connectionLock.withLock {
+            val currentRSocket = rsocket
+            if (currentRSocket != null) {
+                rsocket = null
+                currentRSocket.dispose()
+                clientSettingsService.clearSettings()
+            }
+        }
     }
 
     fun disposeClient() {
@@ -287,6 +300,7 @@ class AxoniqConsoleRSocketClient(
         }
 
         override fun onDisconnected() {
+            logger.info("This application has lost its connection to AxonIQ Console. Reconnection will be automatically attempted.")
             this.heartbeatSendTask?.cancel(true)
             this.heartbeatCheckTask?.cancel(true)
         }
