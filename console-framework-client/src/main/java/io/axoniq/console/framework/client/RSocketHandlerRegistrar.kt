@@ -16,6 +16,7 @@
 
 package io.axoniq.console.framework.client
 
+import io.axoniq.console.framework.api.Routes
 import io.axoniq.console.framework.client.strategy.RSocketPayloadEncodingStrategy
 import io.rsocket.Payload
 import io.rsocket.RSocket
@@ -30,6 +31,14 @@ class RSocketHandlerRegistrar(
 ) : RSocket {
     private val logger = LoggerFactory.getLogger(this::class.java)
     private val handlers: MutableList<RegisteredRsocketMessageHandler> = mutableListOf()
+
+    companion object {
+        /** Routes that contain sensitive information and should not have their payloads logged. */
+        private val SENSITIVE_ROUTES = setOf(
+            Routes.Management.LICENSE,
+            Routes.Management.LICENSE_REQUEST
+        )
+    }
 
     fun registerHandlerWithoutPayload(route: String, handler: () -> Any) {
         logger.debug("Registered AxonIQ Console handler for route {}", route)
@@ -79,7 +88,8 @@ class RSocketHandlerRegistrar(
         route: String,
     ): Any {
         val decodedPayload = encodingStrategy.decode(payload, matchingHandler.payloadType)
-        logger.debug("Received AxonIQ Console message for route [$route] with payload: [{}]", decodedPayload)
+        val payloadLog = if (route in SENSITIVE_ROUTES) "[REDACTED]" else decodedPayload
+        logger.debug("Received AxonIQ Console message for route [$route] with payload: [{}]", payloadLog)
         return matchingHandler.handler.invoke(decodedPayload)
     }
 

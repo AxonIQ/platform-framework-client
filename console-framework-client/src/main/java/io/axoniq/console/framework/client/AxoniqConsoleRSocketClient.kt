@@ -105,6 +105,32 @@ class AxoniqConsoleRSocketClient(
         registrar.registerHandlerWithPayload(Routes.Management.LOG, Notification::class.java) {
             logger.logNotification(it)
         }
+
+        // Server can push license/entitlement information (e.g., when a new license is generated)
+        registrar.registerHandlerWithPayload(Routes.Management.LICENSE, String::class.java) {
+            logger.info("Received license push from Axoniq Platform")
+        }
+    }
+
+    /**
+     * Requests the license from the server.
+     * Called after successful connection to fetch the current license.
+     */
+    private fun requestLicense(): Mono<String?> {
+        return rsocket
+                ?.requestResponse(encodingStrategy.encode("", createRoutingMetadata(Routes.Management.LICENSE_REQUEST)))
+                ?.map { payload ->
+                    val license = encodingStrategy.decode(payload, String::class.java)
+                    if (license.isNotBlank()) {
+                        logger.info("Received license from Axoniq Platform")
+                    }
+                    license
+                }
+                ?.onErrorResume { e ->
+                    logger.debug("Failed to request license: {}", e.message)
+                    Mono.empty()
+                }
+                ?: Mono.empty()
     }
 
     override fun registerLifecycleHandlers(registry: Lifecycle.LifecycleRegistry) {
@@ -176,6 +202,8 @@ class AxoniqConsoleRSocketClient(
                 supressConnectMessage = true
             }
             connectionRetryCount = 0
+            // Request the license after successful connection
+            requestLicense().subscribe()
         } catch (e: Exception) {
             if (connectionRetryCount == 10) {
                 logger.error("Failed to connect to Axoniq Platform. Error: ${e.message}. Will keep trying to connect...")
