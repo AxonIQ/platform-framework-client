@@ -32,6 +32,10 @@ object Routes {
         const val START_REPORTS = "client-reporting-start"
         // Request to send a thread dump
         const val THREAD_DUMP = "client-thread-dump"
+        // Route for server to push license updates to the client
+        const val LICENSE = "client-license"
+        // Route for client to request license on connect
+        const val LICENSE_REQUEST = "client-license-request"
     }
 
     object EventProcessor {

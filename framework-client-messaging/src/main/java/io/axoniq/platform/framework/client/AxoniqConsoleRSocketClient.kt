@@ -24,6 +24,7 @@ import io.axoniq.platform.framework.api.notifications.Notification
 import io.axoniq.platform.framework.api.notifications.NotificationLevel
 import io.axoniq.platform.framework.api.notifications.NotificationList
 import io.axoniq.platform.framework.AxoniqPlatformConfiguration
+import io.axoniq.platform.framework.client.license.LicenseHolder
 import io.axoniq.platform.framework.client.strategy.RSocketPayloadEncodingStrategy
 import io.netty.buffer.ByteBufAllocator
 import io.netty.buffer.CompositeByteBuf
@@ -109,6 +110,34 @@ class AxoniqConsoleRSocketClient(
         registrar.registerHandlerWithPayload(Routes.Management.LOG, Notification::class.java) {
             logger.logNotification(it)
         }
+
+        // Server can push license/entitlement information (e.g., when a new license is generated)
+        registrar.registerHandlerWithPayload(Routes.Management.LICENSE, String::class.java) { licenseContent ->
+            logger.info("Received license push from Axoniq Platform")
+            LicenseHolder.INSTANCE.updateLicense(licenseContent)
+        }
+    }
+
+    /**
+     * Requests the license from the server.
+     * Called after successful connection to fetch the current license.
+     */
+    private fun requestLicense(): Mono<String?> {
+        return rsocket
+                ?.requestResponse(encodingStrategy.encode("", createRoutingMetadata(Routes.Management.LICENSE_REQUEST)))
+                ?.map { payload ->
+                    val license = encodingStrategy.decode(payload, String::class.java)
+                    if (license.isNotBlank()) {
+                        logger.info("Received license from Axoniq Platform")
+                        LicenseHolder.INSTANCE.updateLicense(license)
+                    }
+                    license
+                }
+                ?.onErrorResume { e ->
+                    logger.warn("Failed to request license from Axoniq Platform: {} - license service may be unavailable", e.message)
+                    Mono.empty()
+                }
+                ?: Mono.empty()
     }
 
     /**
@@ -175,6 +204,8 @@ class AxoniqConsoleRSocketClient(
                 supressConnectMessage = true
             }
             connectionRetryCount = 0
+            // Request the license after successful connection
+            requestLicense().subscribe()
         } catch (e: Exception) {
             if (connectionRetryCount == 10) {
                 logger.error("Failed to connect to Axoniq Platform. Error: ${e.message}. Will keep trying to connect...")
@@ -253,6 +284,10 @@ class AxoniqConsoleRSocketClient(
                 rsocket = null
                 currentRSocket.dispose()
                 clientSettingsService.clearSettings()
+                // Note: We intentionally do NOT clear the license on disconnect.
+                // The license remains valid until expiry/grace period, enabling
+                // "Trust but Verify" philosophy - extensions continue working
+                // even during temporary connection outages.
             }
         }
     }
