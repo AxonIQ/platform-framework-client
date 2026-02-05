@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025. AxonIQ B.V.
+ * Copyright (c) 2022-2026. AxonIQ B.V.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package io.axoniq.console.framework.eventprocessor.metrics
 import io.axoniq.console.framework.computeIfAbsentWithRetry
 import org.axonframework.messaging.unitofwork.BatchingUnitOfWork
 import org.axonframework.messaging.unitofwork.CurrentUnitOfWork
+import org.slf4j.LoggerFactory
 import java.time.Clock
 import java.time.Instant
 import java.time.temporal.ChronoUnit
@@ -27,6 +28,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 class ProcessorMetricsRegistry {
+    private val logger = LoggerFactory.getLogger(this::class.java)
     private val ingestLatencyRegistry: MutableMap<String, MutableMap<Int, ExpiringLatencyValue>> = ConcurrentHashMap()
     private val commitLatencyRegistry: MutableMap<String, MutableMap<Int, ExpiringLatencyValue>> = ConcurrentHashMap()
     private val processingLatencyRegistry: MutableMap<String, MutableMap<Int, Instant?>> = ConcurrentHashMap()
@@ -40,20 +42,24 @@ class ProcessorMetricsRegistry {
     }
 
     fun <T> doWithActiveMessageForSegment(processor: String, segment: Int, messageTimestamp: Instant, action: () -> T?): T? {
-        val processingMessageTimestampsForSegment = getProcessingLatencySegmentMap(processor)
-
         try {
+            val processingMessageTimestampsForSegment = getProcessingLatencySegmentMap(processor)
             processingMessageTimestampsForSegment[segment] = messageTimestamp
-            return action()
-        } finally {
+        } catch (e: Exception) {
+            logger.debug("AxonIQ Console could not track active message for processor $processor segment $segment", e)
+        }
+        try {
             val uow = CurrentUnitOfWork.get()
-            if(uow !is BatchingUnitOfWork || uow.isFirstMessage) {
+            if (uow !is BatchingUnitOfWork || uow.isFirstMessage) {
                 uow.onCleanup {
                     getProcessingLatencySegmentMap(processor)
                             .remove(segment)
                 }
             }
+        } catch (e: Exception) {
+            logger.debug("AxonIQ Console could not register cleanup for processor $processor segment $segment", e)
         }
+        return action()
     }
 
     fun ingestLatencyForProcessor(processor: String, segment: Int): ExpiringLatencyValue {
@@ -81,7 +87,7 @@ class ProcessorMetricsRegistry {
             .computeIfAbsentWithRetry(processor) { ConcurrentHashMap() }
 
     class ExpiringLatencyValue(
-        private val expiryTime: Long = 2 * 60 * 1000 // Default to 2 minutes
+            private val expiryTime: Long = 2 * 60 * 1000 // Default to 2 minutes
     ) {
         private val clock = Clock.systemUTC()
         private val value: AtomicReference<Double> = AtomicReference(-1.0)
