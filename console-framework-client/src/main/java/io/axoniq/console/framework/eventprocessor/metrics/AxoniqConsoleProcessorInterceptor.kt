@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025. AxonIQ B.V.
+ * Copyright (c) 2022-2026. AxonIQ B.V.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,11 +44,13 @@ class AxoniqConsoleProcessorInterceptor(
         if (message !is EventMessage) {
             return interceptorChain.proceed()
         }
+
+        var segment = -1
         try {
             AxoniqConsoleSpanFactory.onTopLevelSpanIfActive {
                 it.reportProcessorName(processorName)
             }
-            val segment = unitOfWork.resources()["Processor[$processorName]/SegmentId"] as? Int ?: -1
+            segment = unitOfWork.resources()["Processor[$processorName]/SegmentId"] as? Int ?: -1
             val ingestTimestamp = Instant.now()
             processorMetricsRegistry.registerIngested(
                     processorName,
@@ -64,13 +66,12 @@ class AxoniqConsoleProcessorInterceptor(
                     )
                 }
             }
-
-            return processorMetricsRegistry.doWithActiveMessageForSegment(processorName, segment, message.timestamp) {
-                interceptorChain.proceed()
-            }
         } catch (e: Exception) {
             logger.debug("AxonIQ Console could not register metrics for processor $processorName", e)
-            return interceptorChain.proceed()
+        }
+
+        return processorMetricsRegistry.doWithActiveMessageForSegment(processorName, segment, message.timestamp) {
+            interceptorChain.proceed()
         }
     }
 }
