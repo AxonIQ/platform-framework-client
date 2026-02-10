@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025. AxonIQ B.V.
+ * Copyright (c) 2022-2026. AxonIQ B.V.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,8 +35,7 @@ class RSocketHandlerRegistrar(
     companion object {
         /** Routes that contain sensitive information and should not have their payloads logged. */
         private val SENSITIVE_ROUTES = setOf(
-            Routes.Management.LICENSE,
-            Routes.Management.LICENSE_REQUEST
+            Routes.License.LICENSE,
         )
     }
 

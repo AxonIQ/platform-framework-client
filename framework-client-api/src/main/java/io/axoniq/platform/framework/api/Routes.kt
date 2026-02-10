@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025. AxonIQ B.V.
+ * Copyright (c) 2022-2026. AxonIQ B.V.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,10 +32,8 @@ object Routes {
         const val START_REPORTS = "client-reporting-start"
         // Request to send a thread dump
         const val THREAD_DUMP = "client-thread-dump"
-        // Route for server to push license updates to the client
-        const val LICENSE = "client-license"
-        // Route for client to request license on connect
-        const val LICENSE_REQUEST = "client-license-request"
+        // Update pushed to the client whenever its status changes
+        const val STATUS = "client-status"
     }
 
     object EventProcessor {
@@ -79,5 +77,9 @@ object Routes {
 
     object MessageFlow {
         const val STATS = "message-flow-stats"
+    }
+
+    object License {
+        const val LICENSE = "license"
     }
 }
