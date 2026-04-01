@@ -33,7 +33,8 @@ import io.axoniq.console.framework.client.ClientSettingsService;
 import io.axoniq.console.framework.client.RSocketHandlerRegistrar;
 import io.axoniq.console.framework.client.ServerProcessorReporter;
 import io.axoniq.console.framework.client.SetupPayloadCreator;
-import io.axoniq.console.framework.client.strategy.CborEncodingStrategy;
+import io.axoniq.console.framework.client.strategy.CborJackson2EncodingStrategy;
+import io.axoniq.console.framework.client.strategy.CborJackson3EncodingStrategy;
 import io.axoniq.console.framework.client.strategy.RSocketPayloadEncodingStrategy;
 import io.axoniq.console.framework.eventprocessor.DeadLetterManager;
 import io.axoniq.console.framework.eventprocessor.EventProcessorManager;
@@ -176,7 +177,7 @@ public class AxoniqConsoleConfigurerModule implements ConfigurerModule {
                                    )
                 )
                 .registerComponent(RSocketPayloadEncodingStrategy.class,
-                                   c -> new CborEncodingStrategy()
+                                   c -> createJackson2Or3EncodingStrategy()
                 )
                 .registerComponent(RSocketHandlerRegistrar.class,
                                    c -> new RSocketHandlerRegistrar(c.getComponent(RSocketPayloadEncodingStrategy.class))
@@ -311,6 +312,54 @@ public class AxoniqConsoleConfigurerModule implements ConfigurerModule {
 
         new AxoniqConsoleAggregateConfigurerModule().configureModule(configurer);
         new AxoniqConsoleEnhancingConfigurerModule(spanMatcherPredicateMap).configureModule(configurer);
+    }
+
+    /**
+     * Checks the classpath for Jackson 2 or Jackson 3 and its requirements for this application.
+     * Will fail to create the component if neither is there, or if one is present and doesn't have the right modules.
+     */
+    private static RSocketPayloadEncodingStrategy createJackson2Or3EncodingStrategy() {
+        try {
+            Class.forName("com.fasterxml.jackson.databind.ObjectMapper");
+            try {
+                Class.forName(
+                        "com.fasterxml.jackson.dataformat.cbor.databind.CBORMapper");
+                try {
+                    Class.forName(
+                            "com.fasterxml.jackson.module.kotlin.KotlinModule");
+                    return new CborJackson2EncodingStrategy();
+                } catch (ClassNotFoundException e) {
+                    throw new IllegalArgumentException(
+                            "Found Jackson 2 on the classpath, but can not find the KotlinModule. Please add the com.fasterxml.jackson.module:jackson-module-kotlin dependency to your project");
+                }
+            } catch (ClassNotFoundException e) {
+                throw new IllegalArgumentException(
+                        "Found Jackson 2 on the classpath, but cannot find the CBOR dataformat. Please add the com.fasterxml.jackson.dataformat:jackson-dataformat-cbor dependency to your project.");
+            }
+        } catch (ClassNotFoundException e) {
+
+        }
+
+        try {
+            Class.forName("tools.jackson.databind.ObjectMapper");
+            try {
+                Class.forName("tools.jackson.dataformat.cbor.CBORMapper");
+                try {
+                    Class.forName("tools.jackson.module.kotlin.KotlinModule");
+                    return new CborJackson3EncodingStrategy();
+                } catch (ClassNotFoundException e) {
+                    throw new IllegalArgumentException(
+                            "Found Jackson 3 on the classpath, but can not find the KotlinModule. Please add the tools.jackson.module:jackson-module-kotlin dependency to your project");
+                }
+            } catch (ClassNotFoundException e) {
+                throw new IllegalArgumentException(
+                        "Found Jackson 3 on the classpath, but cannot find the CBOR dataformat. Please add the tools.jackson.dataformat:jackson-dataformat-cbor dependency to your project.");
+            }
+        } catch (ClassNotFoundException e) {
+            // Do nothing, Jackson 3 is not on the classpath. Continue to check for 2
+            throw new IllegalArgumentException(
+                    "Neither Jackson 2 nor 3 was found on the classpath. Please add either Jackson 2 or 3 to your project.");
+        }
     }
 
     /**
