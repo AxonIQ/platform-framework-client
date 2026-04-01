@@ -320,25 +320,6 @@ public class AxoniqConsoleConfigurerModule implements ConfigurerModule {
      */
     private static RSocketPayloadEncodingStrategy createJackson2Or3EncodingStrategy() {
         try {
-            Class.forName("tools.jackson.databind.ObjectMapper");
-            try {
-                Class.forName("tools.jackson.dataformat.cbor.CBORMapper");
-                try {
-                    Class.forName("tools.jackson.module.kotlin.KotlinModule");
-                    return new CborJackson3EncodingStrategy();
-                } catch (ClassNotFoundException e) {
-                    throw new IllegalArgumentException(
-                            "Found Jackson 3 on the classpath, but can not find the KotlinModule. Please add the tools.jackson.module:jackson-module-kotlin dependency to your project");
-                }
-            } catch (ClassNotFoundException e) {
-                throw new IllegalArgumentException(
-                        "Found Jackson 3 on the classpath, but cannot find the CBOR dataformat. Please add the tools.jackson.dataformat:jackson-dataformat-cbor dependency to your project.");
-            }
-        } catch (ClassNotFoundException e) {
-            // Do nothing, Jackson 3 is not on the classpath. Continue to check for 2
-        }
-
-        try {
             Class.forName("com.fasterxml.jackson.databind.ObjectMapper");
             try {
                 Class.forName(
@@ -356,6 +337,26 @@ public class AxoniqConsoleConfigurerModule implements ConfigurerModule {
                         "Found Jackson 2 on the classpath, but cannot find the CBOR dataformat. Please add the com.fasterxml.jackson.dataformat:jackson-dataformat-cbor dependency to your project.");
             }
         } catch (ClassNotFoundException e) {
+
+        }
+
+        try {
+            Class.forName("tools.jackson.databind.ObjectMapper");
+            try {
+                Class.forName("tools.jackson.dataformat.cbor.CBORMapper");
+                try {
+                    Class.forName("tools.jackson.module.kotlin.KotlinModule");
+                    return new CborJackson3EncodingStrategy();
+                } catch (ClassNotFoundException e) {
+                    throw new IllegalArgumentException(
+                            "Found Jackson 3 on the classpath, but can not find the KotlinModule. Please add the tools.jackson.module:jackson-module-kotlin dependency to your project");
+                }
+            } catch (ClassNotFoundException e) {
+                throw new IllegalArgumentException(
+                        "Found Jackson 3 on the classpath, but cannot find the CBOR dataformat. Please add the tools.jackson.dataformat:jackson-dataformat-cbor dependency to your project.");
+            }
+        } catch (ClassNotFoundException e) {
+            // Do nothing, Jackson 3 is not on the classpath. Continue to check for 2
             throw new IllegalArgumentException(
                     "Neither Jackson 2 nor 3 was found on the classpath. Please add either Jackson 2 or 3 to your project.");
         }
