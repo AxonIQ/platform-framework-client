@@ -25,7 +25,7 @@ import io.rsocket.Payload
 import io.rsocket.metadata.WellKnownMimeType
 import io.rsocket.util.DefaultPayload
 
-class CborEncodingStrategy : RSocketPayloadEncodingStrategy {
+class CborJackson2EncodingStrategy : RSocketPayloadEncodingStrategy {
     private val mapper = CBORMapper.builder().build().findAndRegisterModules()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
 
