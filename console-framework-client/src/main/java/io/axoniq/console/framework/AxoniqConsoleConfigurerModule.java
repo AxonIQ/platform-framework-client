@@ -337,7 +337,7 @@ public class AxoniqConsoleConfigurerModule implements ConfigurerModule {
                         "Found Jackson 2 on the classpath, but cannot find the CBOR dataformat. Please add the com.fasterxml.jackson.dataformat:jackson-dataformat-cbor dependency to your project.");
             }
         } catch (ClassNotFoundException e) {
-
+            // Do nothing, Jackson 2 is not on the classpath. Continue to check for 3
         }
 
         try {
@@ -356,7 +356,6 @@ public class AxoniqConsoleConfigurerModule implements ConfigurerModule {
                         "Found Jackson 3 on the classpath, but cannot find the CBOR dataformat. Please add the tools.jackson.dataformat:jackson-dataformat-cbor dependency to your project.");
             }
         } catch (ClassNotFoundException e) {
-            // Do nothing, Jackson 3 is not on the classpath. Continue to check for 2
             throw new IllegalArgumentException(
                     "Neither Jackson 2 nor 3 was found on the classpath. Please add either Jackson 2 or 3 to your project.");
         }
