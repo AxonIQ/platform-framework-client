@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2024. AxonIQ B.V.
+ * Copyright (c) 2022-2026. AxonIQ B.V.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,18 +16,19 @@
 
 package io.axoniq.console.framework.client.strategy
 
-import com.fasterxml.jackson.databind.DeserializationFeature
-import com.fasterxml.jackson.dataformat.cbor.databind.CBORMapper
 import io.netty.buffer.ByteBuf
 import io.netty.buffer.ByteBufAllocator
 import io.netty.buffer.CompositeByteBuf
 import io.rsocket.Payload
 import io.rsocket.metadata.WellKnownMimeType
 import io.rsocket.util.DefaultPayload
+import tools.jackson.databind.DeserializationFeature
+import tools.jackson.dataformat.cbor.CBORMapper
 
-class CborEncodingStrategy : RSocketPayloadEncodingStrategy {
-    private val mapper = CBORMapper.builder().build().findAndRegisterModules()
-            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+class CborJackson3EncodingStrategy : RSocketPayloadEncodingStrategy {
+    private val mapper = CBORMapper.builder()
+            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .build()
 
     override fun getMimeType(): WellKnownMimeType {
         return WellKnownMimeType.APPLICATION_CBOR
