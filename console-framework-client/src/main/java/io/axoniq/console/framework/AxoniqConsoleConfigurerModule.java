@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025. AxonIQ B.V.
+ * Copyright (c) 2022-2026. AxonIQ B.V.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,8 @@ package io.axoniq.console.framework;
 
 import com.fasterxml.jackson.annotation.JsonAutoDetect;
 import com.fasterxml.jackson.annotation.PropertyAccessor;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 import io.axoniq.console.framework.api.AxoniqConsoleDlqMode;
 import io.axoniq.console.framework.api.DomainEventAccessMode;
 import io.axoniq.console.framework.application.DomainEventStreamProvider;
@@ -33,7 +34,6 @@ import io.axoniq.console.framework.client.ClientSettingsService;
 import io.axoniq.console.framework.client.RSocketHandlerRegistrar;
 import io.axoniq.console.framework.client.ServerProcessorReporter;
 import io.axoniq.console.framework.client.SetupPayloadCreator;
-import io.axoniq.console.framework.client.strategy.CborJackson2EncodingStrategy;
 import io.axoniq.console.framework.client.strategy.CborJackson3EncodingStrategy;
 import io.axoniq.console.framework.client.strategy.RSocketPayloadEncodingStrategy;
 import io.axoniq.console.framework.eventprocessor.DeadLetterManager;
@@ -177,7 +177,7 @@ public class AxoniqConsoleConfigurerModule implements ConfigurerModule {
                                    )
                 )
                 .registerComponent(RSocketPayloadEncodingStrategy.class,
-                                   c -> createJackson2Or3EncodingStrategy()
+                                   c -> new CborJackson3EncodingStrategy()
                 )
                 .registerComponent(RSocketHandlerRegistrar.class,
                                    c -> new RSocketHandlerRegistrar(c.getComponent(RSocketPayloadEncodingStrategy.class))
@@ -315,53 +315,6 @@ public class AxoniqConsoleConfigurerModule implements ConfigurerModule {
     }
 
     /**
-     * Checks the classpath for Jackson 2 or Jackson 3 and its requirements for this application.
-     * Will fail to create the component if neither is there, or if one is present and doesn't have the right modules.
-     */
-    private static RSocketPayloadEncodingStrategy createJackson2Or3EncodingStrategy() {
-        try {
-            Class.forName("com.fasterxml.jackson.databind.ObjectMapper");
-            try {
-                Class.forName(
-                        "com.fasterxml.jackson.dataformat.cbor.databind.CBORMapper");
-                try {
-                    Class.forName(
-                            "com.fasterxml.jackson.module.kotlin.KotlinModule");
-                    return new CborJackson2EncodingStrategy();
-                } catch (ClassNotFoundException e) {
-                    throw new IllegalArgumentException(
-                            "Found Jackson 2 on the classpath, but can not find the KotlinModule. Please add the com.fasterxml.jackson.module:jackson-module-kotlin dependency to your project");
-                }
-            } catch (ClassNotFoundException e) {
-                throw new IllegalArgumentException(
-                        "Found Jackson 2 on the classpath, but cannot find the CBOR dataformat. Please add the com.fasterxml.jackson.dataformat:jackson-dataformat-cbor dependency to your project.");
-            }
-        } catch (ClassNotFoundException e) {
-            // Do nothing, Jackson 2 is not on the classpath. Continue to check for 3
-        }
-
-        try {
-            Class.forName("tools.jackson.databind.ObjectMapper");
-            try {
-                Class.forName("tools.jackson.dataformat.cbor.CBORMapper");
-                try {
-                    Class.forName("tools.jackson.module.kotlin.KotlinModule");
-                    return new CborJackson3EncodingStrategy();
-                } catch (ClassNotFoundException e) {
-                    throw new IllegalArgumentException(
-                            "Found Jackson 3 on the classpath, but can not find the KotlinModule. Please add the tools.jackson.module:jackson-module-kotlin dependency to your project");
-                }
-            } catch (ClassNotFoundException e) {
-                throw new IllegalArgumentException(
-                        "Found Jackson 3 on the classpath, but cannot find the CBOR dataformat. Please add the tools.jackson.dataformat:jackson-dataformat-cbor dependency to your project.");
-            }
-        } catch (ClassNotFoundException e) {
-            throw new IllegalArgumentException(
-                    "Neither Jackson 2 nor 3 was found on the classpath. Please add either Jackson 2 or 3 to your project.");
-        }
-    }
-
-    /**
      * Builder class to instantiate a {@link AxoniqConsoleConfigurerModule}.
      */
     public static class Builder {
@@ -389,8 +342,11 @@ public class AxoniqConsoleConfigurerModule implements ConfigurerModule {
         private Integer managementMaxThreadPoolSize = 5;
         private EventScheduler eventScheduler;
 
-        private ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules()
-                .setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY);
+        private ObjectMapper objectMapper = JsonMapper.builder()
+                .findAndAddModules()
+                .changeDefaultVisibility(vc ->
+                        vc.withVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY))
+                .build();
 
         /**
          * Constructor to instantiate a {@link Builder} based on the fields contained in the
