@@ -16,7 +16,7 @@ jobs:
         include:
           - java-version: 17
             sonar-enabled: false
-            deploy-enabled: false
+            deploy-enabled: true
           - java-version: 21
             sonar-enabled: true
             deploy-enabled: false
