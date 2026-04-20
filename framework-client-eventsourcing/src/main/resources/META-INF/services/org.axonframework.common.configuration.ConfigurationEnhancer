@@ -15,3 +15,4 @@
 #
 
 io.axoniq.platform.framework.eventsourcing.AxoniqPlatformEventsourcingConfigurerEnhancer
+io.axoniq.platform.framework.eventsourcing.AxoniqPlatformModelInspectionEnhancer
