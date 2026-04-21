@@ -22,6 +22,9 @@ import com.fasterxml.jackson.databind.SerializationFeature
 import com.fasterxml.jackson.databind.node.ObjectNode
 import io.axoniq.platform.framework.api.*
 import io.axoniq.platform.framework.client.RSocketHandlerRegistrar
+import org.axonframework.common.configuration.Configuration
+import org.axonframework.eventsourcing.CriteriaResolver
+import org.axonframework.eventsourcing.annotation.AnnotationBasedEventCriteriaResolver
 import org.axonframework.eventsourcing.eventstore.EventStorageEngine
 import org.axonframework.eventsourcing.eventstore.SourcingCondition
 import org.axonframework.messaging.eventhandling.TerminalEventMessage
@@ -29,17 +32,28 @@ import org.axonframework.messaging.eventstreaming.EventCriteria
 import org.axonframework.messaging.eventstreaming.Tag
 import org.axonframework.modelling.StateManager
 import org.slf4j.LoggerFactory
+import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 
 open class RSocketModelInspectionResponder(
         private val stateManager: StateManager,
         private val eventStorageEngine: EventStorageEngine,
-        private val registrar: RSocketHandlerRegistrar
+        private val registrar: RSocketHandlerRegistrar,
+        private val configuration: Configuration
 ) {
     private val logger = LoggerFactory.getLogger(this::class.java)
     private val objectMapper = ObjectMapper().apply {
         findAndRegisterModules()
         disable(SerializationFeature.FAIL_ON_EMPTY_BEANS)
     }
+
+    /**
+     * Cache of [CriteriaResolver] instances per (entityType, idType) pair. Resolvers are
+     * stateless and obtaining one via reflection is not free, so caching avoids repeating
+     * the work on every query. Keyed by class identity so redeploys with different classloaders
+     * get fresh entries naturally.
+     */
+    private val criteriaResolverCache = ConcurrentHashMap<Pair<Class<*>, Class<*>>, CriteriaResolver<Any?>>()
 
     fun start() {
         registrar.registerHandlerWithoutPayload(
@@ -174,21 +188,254 @@ open class RSocketModelInspectionResponder(
         logger.debug("Handling Axoniq Platform MODEL_REGISTERED_ENTITIES query")
         val entities = stateManager.registeredEntities().map { entityType ->
             val idTypes = stateManager.registeredIdsFor(entityType)
+            // Prefer the first registered id type for introspection. Entities registered with
+            // multiple id types (rare) still get a sensible default; the frontend can extend
+            // this to switch among id types later.
+            val primaryIdType = idTypes.firstOrNull()
             RegisteredEntityInfo(
                     entityType = entityType.name,
-                    idTypes = idTypes.map { it.name }
+                    idTypes = idTypes.map { it.name },
+                    idFields = primaryIdType?.let { describeIdFields(it) } ?: emptyList()
             )
         }
         return RegisteredEntitiesResult(entities = entities)
+    }
+
+    /**
+     * Returns structural descriptors for the given id class. Empty for "simple" types where
+     * the frontend should show a single text input (String, primitives, UUID); populated for
+     * records / data classes / plain objects where each property should get its own input.
+     */
+    private fun describeIdFields(idClass: Class<*>): List<IdFieldDescriptor> {
+        if (isSimpleIdType(idClass)) {
+            return emptyList()
+        }
+        // Records: use the declared record components in canonical order.
+        if (idClass.isRecord) {
+            return idClass.recordComponents.map { component ->
+                IdFieldDescriptor(
+                        name = component.name,
+                        type = normalizedType(component.type),
+                        javaType = component.type.name
+                )
+            }
+        }
+        // Kotlin data classes / POJOs: walk declared fields, skip synthetic/static.
+        return idClass.declaredFields
+                .filter { field ->
+                    !java.lang.reflect.Modifier.isStatic(field.modifiers) &&
+                            !field.isSynthetic
+                }
+                .map { field ->
+                    IdFieldDescriptor(
+                            name = field.name,
+                            type = normalizedType(field.type),
+                            javaType = field.type.name
+                    )
+                }
+    }
+
+    /**
+     * A "simple" id type is one the frontend can reasonably capture with a single text input.
+     * Everything else is treated as compound (structured) and gets field-by-field descriptors.
+     *
+     * Kotlin `@JvmInline value class` wrappers (e.g. `value class OrderId(val value: String)`) are
+     * also treated as simple when their underlying property is itself simple — the user sees one
+     * input and we box the typed value at deserialization time.
+     */
+    private fun isSimpleIdType(idClass: Class<*>): Boolean {
+        if (idClass.isPrimitive) return true
+        if (idClass.isEnum) return true
+        if (isKotlinValueClass(idClass)) {
+            val underlying = kotlinValueClassUnderlying(idClass)
+            return underlying != null && isSimpleIdType(underlying)
+        }
+        return when (idClass) {
+            String::class.java,
+            java.lang.Long::class.java,
+            java.lang.Integer::class.java,
+            java.lang.Short::class.java,
+            java.lang.Byte::class.java,
+            java.lang.Double::class.java,
+            java.lang.Float::class.java,
+            java.lang.Boolean::class.java,
+            java.lang.Character::class.java,
+            UUID::class.java,
+            java.math.BigInteger::class.java,
+            java.math.BigDecimal::class.java -> true
+            else -> false
+        }
+    }
+
+    /** True if the class is a Kotlin `@JvmInline value class`. */
+    private fun isKotlinValueClass(idClass: Class<*>): Boolean {
+        return idClass.isAnnotationPresent(JvmInline::class.java)
+    }
+
+    /**
+     * Returns the underlying backing type of a Kotlin value class, or null when the class
+     * doesn't expose exactly one instance field (shouldn't happen for well-formed value classes,
+     * but we stay defensive against synthetic/static noise from compiler plugins).
+     */
+    private fun kotlinValueClassUnderlying(idClass: Class<*>): Class<*>? {
+        val instanceFields = idClass.declaredFields.filter { f ->
+            !java.lang.reflect.Modifier.isStatic(f.modifiers) && !f.isSynthetic
+        }
+        return instanceFields.singleOrNull()?.type
+    }
+
+    /** Maps a Java class to a frontend-friendly type label used to choose input widgets. */
+    private fun normalizedType(type: Class<*>): String {
+        if (type == UUID::class.java) return "uuid"
+        if (type == String::class.java) return "string"
+        if (type == java.lang.Boolean::class.java || type == java.lang.Boolean.TYPE) return "boolean"
+        if (type == java.lang.Character::class.java || type == java.lang.Character.TYPE) return "string"
+        if (Number::class.java.isAssignableFrom(type) || type.isPrimitive) return "number"
+        return "object"
+    }
+
+    /**
+     * Resolves the [EventCriteria] for a given entity query. Instead of hand-crafting a
+     * single `Tag.of(tagKey, entityId)` (which only works for single-tag entities with
+     * string ids), we invoke the entity's registered [CriteriaResolver] with a typed id,
+     * so multi-tag and compound-id entities produce the correct criteria.
+     *
+     * Falls back to the legacy single-tag approach only if resolver construction or
+     * invocation fails, so this stays backward-compatible with edge cases.
+     */
+    private fun resolveCriteria(entityTypeName: String, entityId: String): EventCriteria {
+        return try {
+            val entityClass = Class.forName(entityTypeName)
+            val idClass = stateManager.registeredIdsFor(entityClass).firstOrNull()
+                    ?: return legacyTagCriteria(entityTypeName, entityId)
+            // Jackson can theoretically return null for an input of `"null"`; the resolver
+            // signature is @Nonnull so we treat that as an invalid id and fall back.
+            val typedId = deserializeEntityId(entityId, idClass)
+                    ?: return legacyTagCriteria(entityTypeName, entityId)
+            val resolver = obtainCriteriaResolver(entityClass, idClass)
+            // ProcessingContext is declared @Nonnull but the default
+            // AnnotationBasedEventCriteriaResolver never reads it (verified in AF5 source).
+            // Custom resolvers that actually rely on it will throw NPE here, which is caught
+            // by the outer try/catch and falls back to the legacy single-tag path.
+            resolver.resolve(typedId, null)
+        } catch (e: Exception) {
+            logger.warn("CriteriaResolver path failed for entity [{}] id [{}] — falling back to legacy tag lookup: {}",
+                    entityTypeName, entityId, e.message)
+            legacyTagCriteria(entityTypeName, entityId)
+        }
+    }
+
+    private fun legacyTagCriteria(entityTypeName: String, entityId: String): EventCriteria {
+        val tagKey = resolveTagKey(entityTypeName)
+        return EventCriteria.havingTags(Tag.of(tagKey, entityId))
+    }
+
+    /**
+     * Parses the incoming [entityId] wire string into the entity's id type. For simple id
+     * types we parse directly; for compound types the wire format is a JSON object whose
+     * keys match the id's property names.
+     */
+    private fun deserializeEntityId(entityId: String, idClass: Class<*>): Any? {
+        val trimmed = entityId.trim()
+        return when {
+            idClass == String::class.java -> trimmed
+            idClass == UUID::class.java -> UUID.fromString(trimmed)
+            idClass == java.lang.Long::class.java || idClass == java.lang.Long.TYPE -> trimmed.toLong()
+            idClass == java.lang.Integer::class.java || idClass == java.lang.Integer.TYPE -> trimmed.toInt()
+            idClass == java.lang.Short::class.java || idClass == java.lang.Short.TYPE -> trimmed.toShort()
+            idClass == java.lang.Byte::class.java || idClass == java.lang.Byte.TYPE -> trimmed.toByte()
+            idClass == java.lang.Double::class.java || idClass == java.lang.Double.TYPE -> trimmed.toDouble()
+            idClass == java.lang.Float::class.java || idClass == java.lang.Float.TYPE -> trimmed.toFloat()
+            idClass == java.lang.Boolean::class.java || idClass == java.lang.Boolean.TYPE -> trimmed.toBoolean()
+            idClass == java.math.BigInteger::class.java -> java.math.BigInteger(trimmed)
+            idClass == java.math.BigDecimal::class.java -> java.math.BigDecimal(trimmed)
+            idClass.isEnum -> {
+                @Suppress("UNCHECKED_CAST")
+                java.lang.Enum.valueOf(idClass as Class<out Enum<*>>, trimmed)
+            }
+            isKotlinValueClass(idClass) -> deserializeValueClass(trimmed, idClass)
+            else -> objectMapper.readValue(trimmed, idClass)
+        }
+    }
+
+    /**
+     * Deserializes a Kotlin `@JvmInline value class` from its wire form. The frontend sends the
+     * *underlying* value (e.g. `"abc-123"` for `value class OrderId(val value: String)`), we parse
+     * it against the underlying type, and box it via the value class's public constructor so the
+     * framework's [CriteriaResolver] sees the real typed id.
+     */
+    private fun deserializeValueClass(raw: String, idClass: Class<*>): Any? {
+        val underlying = kotlinValueClassUnderlying(idClass) ?: return null
+        val underlyingValue = deserializeEntityId(raw, underlying) ?: return null
+        return try {
+            idClass.getDeclaredConstructor(underlying)
+                    .apply { isAccessible = true }
+                    .newInstance(underlyingValue)
+        } catch (e: NoSuchMethodException) {
+            logger.debug("No public constructor({}) on Kotlin value class [{}]; falling back to Jackson",
+                    underlying.name, idClass.name)
+            objectMapper.readValue(raw, idClass)
+        }
+    }
+
+    /**
+     * Obtains a [CriteriaResolver] for the given (entityType, idType) pair. Strategy:
+     *   1. Try to extract the registered resolver from the repository returned by
+     *      [StateManager.repository] via reflection on its private `criteriaResolver` field.
+     *      This honors custom resolvers that an application may have configured.
+     *   2. Fall back to constructing a fresh [AnnotationBasedEventCriteriaResolver] from
+     *      the available [Configuration], which covers the default annotation-driven setup.
+     * Results are cached per class pair.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun obtainCriteriaResolver(entityClass: Class<*>, idClass: Class<*>): CriteriaResolver<Any?> {
+        return criteriaResolverCache.getOrPut(entityClass to idClass) {
+            extractResolverFromRepository(entityClass, idClass)
+                    ?: AnnotationBasedEventCriteriaResolver<Any, Any>(
+                            entityClass as Class<Any>,
+                            idClass as Class<Any>,
+                            configuration
+                    ) as CriteriaResolver<Any?>
+        }
+    }
+
+    /**
+     * Reflects on the repository returned by [StateManager] to extract its `criteriaResolver`
+     * field. This yields the exact resolver the framework uses at runtime (respecting any
+     * custom configuration). Returns null when the repository is not an EventSourcingRepository
+     * or the field cannot be read — the caller then falls back to the annotation-based resolver.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun extractResolverFromRepository(entityClass: Class<*>, idClass: Class<*>): CriteriaResolver<Any?>? {
+        return try {
+            val repository = stateManager.repository(entityClass, idClass) ?: return null
+            val field = findField(repository.javaClass, "criteriaResolver") ?: return null
+            field.isAccessible = true
+            field.get(repository) as? CriteriaResolver<Any?>
+        } catch (e: Exception) {
+            logger.debug("Could not extract CriteriaResolver from repository for [{}]: {}",
+                    entityClass.name, e.message)
+            null
+        }
+    }
+
+    private fun findField(type: Class<*>, name: String): java.lang.reflect.Field? {
+        var current: Class<*>? = type
+        while (current != null && current != Any::class.java) {
+            try {
+                return current.getDeclaredField(name)
+            } catch (_: NoSuchFieldException) {
+                current = current.superclass
+            }
+        }
+        return null
     }
 
     private fun handleDomainEvents(query: ModelDomainEventsQuery): DomainEventsResult {
         logger.info("Handling Axoniq Platform MODEL_DOMAIN_EVENTS query for entity type [{}] id [{}]",
                 query.entityType, query.entityId)
 
-        val tagKey = resolveTagKey(query.entityType)
-        logger.info("Resolved tag key [{}] for entity type [{}]", tagKey, query.entityType)
-        val criteria = EventCriteria.havingTags(Tag.of(tagKey, query.entityId))
+        val criteria = resolveCriteria(query.entityType, query.entityId)
         val condition = SourcingCondition.conditionFor(criteria)
 
         // Use reduce() which returns a CompletableFuture that completes when the stream is done.
@@ -213,8 +460,8 @@ open class RSocketModelInspectionResponder(
             mutableListOf()
         }
 
-        logger.info("Sourced [{}] events for entity type [{}] id [{}] with tag [{}={}]",
-                allEvents.size, query.entityType, query.entityId, tagKey, query.entityId)
+        logger.info("Sourced [{}] events for entity type [{}] id [{}]",
+                allEvents.size, query.entityType, query.entityId)
 
         val totalCount = allEvents.size.toLong()
         val start = query.page * query.pageSize
@@ -235,9 +482,7 @@ open class RSocketModelInspectionResponder(
         logger.info("Handling Axoniq Platform MODEL_ENTITY_STATE_AT_SEQUENCE query for entity type [{}] id [{}] seq [{}]",
                 query.entityType, query.entityId, query.maxSequenceNumber)
 
-        val tagKey = resolveTagKey(query.entityType)
-        logger.info("Resolved tag key [{}] for entity type [{}]", tagKey, query.entityType)
-        val criteria = EventCriteria.havingTags(Tag.of(tagKey, query.entityId))
+        val criteria = resolveCriteria(query.entityType, query.entityId)
         val condition = SourcingCondition.conditionFor(criteria)
 
         // Collect all events up to (and including) the max sequence number
@@ -306,9 +551,7 @@ open class RSocketModelInspectionResponder(
         logger.info("Handling Axoniq Platform MODEL_REPLAY_TIMELINE query for entity type [{}] id [{}] offset [{}] limit [{}]",
                 query.entityType, query.entityId, query.offset, query.limit)
 
-        val tagKey = resolveTagKey(query.entityType)
-        logger.info("Resolved tag key [{}] for entity type [{}]", tagKey, query.entityType)
-        val criteria = EventCriteria.havingTags(Tag.of(tagKey, query.entityId))
+        val criteria = resolveCriteria(query.entityType, query.entityId)
         val condition = SourcingCondition.conditionFor(criteria)
 
         val offset = maxOf(0, query.offset)

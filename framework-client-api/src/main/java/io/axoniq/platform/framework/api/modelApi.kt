@@ -23,6 +23,22 @@ data class RegisteredEntitiesResult(
 data class RegisteredEntityInfo(
         val entityType: String,
         val idTypes: List<String>,
+        /**
+         * Structural descriptors of the id class's properties. Empty when the id is a
+         * "simple" type (String, primitives, UUID, etc.) — in that case the frontend should
+         * render a single text input. When populated, the id is a compound type (record /
+         * data class / plain object) and the frontend should render one input per descriptor
+         * and send the entityId as a JSON object keyed by the descriptor names.
+         */
+        val idFields: List<IdFieldDescriptor> = emptyList(),
+)
+
+data class IdFieldDescriptor(
+        val name: String,
+        /** Normalized form-friendly type: "string", "number", "boolean", "uuid", or "object". */
+        val type: String,
+        /** Fully qualified Java type name, useful for diagnostics / future extensions. */
+        val javaType: String,
 )
 
 data class ModelDomainEventsQuery(

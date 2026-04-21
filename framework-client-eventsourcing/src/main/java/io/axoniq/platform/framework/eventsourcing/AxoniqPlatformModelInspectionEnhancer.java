@@ -44,7 +44,8 @@ public class AxoniqPlatformModelInspectionEnhancer implements ConfigurationEnhan
                                            .withBuilder(c -> new RSocketModelInspectionResponder(
                                                    c.getComponent(StateManager.class),
                                                    c.getComponent(EventStorageEngine.class),
-                                                   c.getComponent(RSocketHandlerRegistrar.class)))
+                                                   c.getComponent(RSocketHandlerRegistrar.class),
+                                                   c))
                                            .onStart(Phase.EXTERNAL_CONNECTIONS, RSocketModelInspectionResponder::start));
     }
 
