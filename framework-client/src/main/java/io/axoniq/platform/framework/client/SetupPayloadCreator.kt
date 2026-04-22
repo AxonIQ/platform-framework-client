@@ -208,9 +208,6 @@ class SetupPayloadCreator(
             "io.axoniq.platform:axoniq-platform-framework-client-api",
             "io.axoniq.platform:axoniq-platform-framework-client",
             "io.axoniq.platform:axoniq-platform-spring-boot-starter",
-            "io.axoniq.framework.platform:axoniq-platform-client",
-            "io.axoniq.framework.platform:axoniq-platform-spring-boot-autoconfigure",
-            "io.axoniq.framework.platform:axoniq-platform-spring-boot-starter",
             // Axon Server connector (transitive runtime)
             "io.axoniq:axonserver-connector-java",
     )
