@@ -23,7 +23,7 @@ import org.axonframework.messaging.commandhandling.CommandBus
 import org.axonframework.messaging.commandhandling.CommandHandler
 import org.axonframework.messaging.commandhandling.CommandMessage
 import org.axonframework.messaging.commandhandling.CommandResultMessage
-import org.axonframework.messaging.commandhandling.distributed.DistributedCommandBusConfigurationEnhancer
+import io.axoniq.framework.messaging.commandhandling.distributed.DistributedCommandBusConfigurationEnhancer
 import org.axonframework.messaging.core.QualifiedName
 import org.axonframework.messaging.core.unitofwork.ProcessingContext
 import java.util.concurrent.CompletableFuture

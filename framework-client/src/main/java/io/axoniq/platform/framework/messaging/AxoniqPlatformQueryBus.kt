@@ -23,7 +23,7 @@ import org.axonframework.messaging.core.MessageStream
 import org.axonframework.messaging.core.QualifiedName
 import org.axonframework.messaging.core.unitofwork.ProcessingContext
 import org.axonframework.messaging.queryhandling.*
-import org.axonframework.messaging.queryhandling.distributed.DistributedQueryBusConfigurationEnhancer
+import io.axoniq.framework.messaging.queryhandling.distributed.DistributedQueryBusConfigurationEnhancer
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.function.Predicate

@@ -138,7 +138,7 @@ class AxoniqConsoleRSocketClient(
                 }
     }
 
-    fun <R> retrieve(payload: Any, route: String, responseType: Class<R>): Mono<R> {
+    fun <R : Any> retrieve(payload: Any, route: String, responseType: Class<R>): Mono<R> {
         return getOrConnectRSocket()
                 .flatMap { socket ->
                     socket.requestResponse(encodingStrategy.encode(payload, createRoutingMetadata(route)))

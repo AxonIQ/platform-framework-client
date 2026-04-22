@@ -29,7 +29,7 @@ import org.axonframework.messaging.eventhandling.annotation.EventHandlingMember
 import org.axonframework.messaging.queryhandling.annotation.QueryHandlingMember
 
 @Priority((Int.MIN_VALUE * 0.95).toInt())
-class AxoniqConsoleHandlerEnhancerDefinition : HandlerEnhancerDefinition {
+class AxoniqPlatformHandlerEnhancerDefinition : HandlerEnhancerDefinition {
     private val logger = KotlinLogging.logger { }
 
 

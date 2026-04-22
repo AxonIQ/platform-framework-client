@@ -20,8 +20,6 @@ import io.axoniq.platform.framework.application.ApplicationMetricRegistry;
 import io.axoniq.platform.framework.application.ApplicationMetricReporter;
 import io.axoniq.platform.framework.application.ApplicationReportCreator;
 import io.axoniq.platform.framework.application.ApplicationThreadDumpProvider;
-import io.axoniq.platform.framework.application.BusType;
-import io.axoniq.platform.framework.application.MeasuringExecutorServiceDecorator;
 import io.axoniq.platform.framework.application.RSocketThreadDumpResponder;
 import io.axoniq.platform.framework.client.AxoniqConsoleRSocketClient;
 import io.axoniq.platform.framework.client.PlatformClientConnectionService;
@@ -45,24 +43,17 @@ import org.axonframework.common.configuration.ConfigurationEnhancer;
 import org.axonframework.common.configuration.DecoratorDefinition;
 import org.axonframework.common.configuration.Module;
 import org.axonframework.common.lifecycle.Phase;
-import org.axonframework.common.util.ExecutorServiceFactory;
 import org.axonframework.messaging.commandhandling.CommandBus;
-import org.axonframework.messaging.commandhandling.distributed.DistributedCommandBusConfiguration;
 import org.axonframework.messaging.eventhandling.EventHandlingComponent;
 import org.axonframework.messaging.eventhandling.processing.streaming.pooled.PooledStreamingEventProcessorModule;
 import org.axonframework.messaging.eventhandling.processing.subscribing.SubscribingEventProcessorModule;
 import org.axonframework.messaging.queryhandling.QueryBus;
-import org.axonframework.messaging.queryhandling.distributed.DistributedQueryBusConfiguration;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-import java.util.Objects;
 import java.util.UUID;
 
 public class AxoniqPlatformConfigurerEnhancer implements ConfigurationEnhancer {
 
     public static final int PLATFORM_ENHANCER_ORDER = Integer.MAX_VALUE - 5;
-    private static final Logger logger = LoggerFactory.getLogger(AxoniqPlatformConfigurerEnhancer.class);
 
     @Override
     public void enhance(ComponentRegistry registry) {
@@ -170,39 +161,7 @@ public class AxoniqPlatformConfigurerEnhancer implements ConfigurationEnhancer {
                                                    c.getComponent(ApplicationThreadDumpProvider.class),
                                                    c.getComponent(RSocketHandlerRegistrar.class)))
                                            // The start handler will allow for eager creation
-                                           .onStart(Phase.EXTERNAL_CONNECTIONS, RSocketThreadDumpResponder::start))
-                .registerDecorator(DecoratorDefinition.forType(DistributedCommandBusConfiguration.class)
-                                                      .with((cc, name, delegate) -> {
-                                                          return new DistributedCommandBusConfiguration(
-                                                                  delegate.loadFactor(),
-                                                                  delegate.commandThreads(),
-                                                                  (config, queue) -> {
-                                                                      var built = delegate.executorServiceFactory()
-                                                                                          .createExecutorService(config,
-                                                                                                                 queue);
-                                                                      return new MeasuringExecutorServiceDecorator(
-                                                                              BusType.COMMAND,
-                                                                              built,
-                                                                              cc.getComponent(ApplicationMetricRegistry.class));
-                                                                  });
-                                                      }))
-                .registerDecorator(DecoratorDefinition.forType(DistributedQueryBusConfiguration.class)
-                                                      .with((cc, name, delegate) -> {
-                                                          try {
-                                                              ExecutorServiceFactory<DistributedQueryBusConfiguration> original = ReflectionKt.getPropertyValue(delegate, "queryExecutorServiceFactory");
-                                                              Objects.requireNonNull(original);
-                                                              ReflectionKt.setPropertyValue(delegate, "queryExecutorServiceFactory", (ExecutorServiceFactory<DistributedQueryBusConfiguration>) (configuration, queue) -> {
-                                                                  var built = original.createExecutorService(configuration, queue);
-                                                                      return new MeasuringExecutorServiceDecorator(
-                                                                              BusType.QUERY,
-                                                                              built,
-                                                                              cc.getComponent(ApplicationMetricRegistry.class));
-                                                              });
-                                                          } catch (Exception e) {
-                                                              logger.error("Failed to instruct DistributedQueryBusConfiguration, e)");
-                                                          }
-                                                          return delegate;
-                                                      }));
+                                           .onStart(Phase.EXTERNAL_CONNECTIONS, RSocketThreadDumpResponder::start));
 
 
         UtilsKt.doOnSubModules(registry, (componentRegistry, module) -> {
@@ -253,7 +212,7 @@ public class AxoniqPlatformConfigurerEnhancer implements ConfigurationEnhancer {
     private String determineInstanceName(Configuration c) {
         try {
             Class<?> connectionManagerClazz = Class.forName(
-                    "org.axonframework.axonserver.connector.AxonServerConnectionManager");
+                    "io.axoniq.framework.axonserver.connector.api.AxonServerConnectionManager");
             if (c.hasComponent(connectionManagerClazz)) {
                 Object connectionManager = c.getComponent(connectionManagerClazz);
                 // Get private connectionFactory field of type factoryClazz

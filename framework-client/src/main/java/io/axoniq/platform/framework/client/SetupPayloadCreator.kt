@@ -42,7 +42,7 @@ import org.axonframework.common.configuration.Configuration
 import org.axonframework.common.util.MavenArtifactVersionResolver
 import org.axonframework.conversion.Converter
 import org.axonframework.messaging.commandhandling.CommandBus
-import org.axonframework.messaging.commandhandling.distributed.PayloadConvertingCommandBusConnector
+import io.axoniq.framework.messaging.commandhandling.distributed.PayloadConvertingCommandBusConnector
 import org.axonframework.messaging.commandhandling.interception.InterceptingCommandBus
 import org.axonframework.messaging.core.SubscribableEventSource
 import org.axonframework.messaging.eventhandling.EventSink
@@ -56,8 +56,8 @@ import org.axonframework.messaging.eventhandling.processing.subscribing.Subscrib
 import org.axonframework.messaging.eventstreaming.StreamableEventSource
 import org.axonframework.messaging.eventstreaming.TrackingTokenSource
 import org.axonframework.messaging.queryhandling.QueryBus
-import org.axonframework.messaging.queryhandling.distributed.PayloadConvertingQueryBusConnector
-import org.axonframework.messaging.queryhandling.distributed.QueryBusConnector
+import io.axoniq.framework.messaging.queryhandling.distributed.PayloadConvertingQueryBusConnector
+import io.axoniq.framework.messaging.queryhandling.distributed.QueryBusConnector
 import org.axonframework.messaging.queryhandling.interception.InterceptingQueryBus
 import java.time.temporal.ChronoUnit
 import java.time.temporal.TemporalAmount
@@ -170,39 +170,47 @@ class SetupPayloadCreator(
             )
 
     private val dependenciesToCheck = listOf(
-            "org.axonframework:axon",
+            // Axon Framework core modules
             "org.axonframework:axon-common",
             "org.axonframework:axon-conversion",
-            "org.axonframework:axon-eventsourcing",
             "org.axonframework:axon-messaging",
             "org.axonframework:axon-modelling",
+            "org.axonframework:axon-eventsourcing",
             "org.axonframework:axon-server-connector",
             "org.axonframework:axon-test",
             "org.axonframework:axon-update",
+            "org.axonframework:axon-integrationtests",
             "org.axonframework:axon-legacy",
             "org.axonframework:axon-legacy-aggregate",
             "org.axonframework:axon-legacy-saga",
             "org.axonframework:axon-migration",
-            "org.axonframework:axon-integrationtests",
             "org.axonframework:axon-todo",
-            "org.axonframework:axon-coverage-report",
-            "org.axonframework.extensions:axon-extensions",
-            "org.axonframework.extensions.metrics:axon-metrics-extension",
-            "org.axonframework.extensions.tracing:axon-tracing-extension",
-            "org.axonframework.extensions.spring:axon-spring-extension",
-            "org.axonframework.extensions.metrics:axon-metrics-micrometer",
+            // Axon Framework extensions
             "org.axonframework.extensions.metrics:axon-metrics-dropwizard",
-            "org.axonframework.extensions.tracing:axon-tracing-opentelemetry",
+            "org.axonframework.extensions.metrics:axon-metrics-micrometer",
+            "org.axonframework.extensions.reactor:axon-reactor",
             "org.axonframework.extensions.spring:axon-spring",
             "org.axonframework.extensions.spring:axon-spring-boot-autoconfigure",
             "org.axonframework.extensions.spring:axon-spring-boot-starter",
-            "io.axoniq.framework:postgresql",
-            "io.axoniq.framework:postgresql-cor",
+            "org.axonframework.extensions.spring:axon-spring-boot-starter-test",
+            "org.axonframework.extensions.tracing:axon-tracing-opentelemetry",
+            // AxonIQ Framework modules
+            "io.axoniq.framework:axon-server-connector",
+            "io.axoniq.framework:axoniq-postgresql",
+            "io.axoniq.framework:axoniq-dead-letter",
+            "io.axoniq.framework:axoniq-distributed-messaging",
+            "io.axoniq.framework:axoniq-event-streaming",
+            "io.axoniq.framework:axoniq-testcontainer",
+            "io.axoniq.framework:axoniq-spring-boot-autoconfigure",
+            "io.axoniq.framework:axoniq-spring-boot-starter",
+            "io.axoniq.framework:axoniq-integrationtests",
+            // AxonIQ Platform client
+            "io.axoniq.platform:framework-client-api",
+            "io.axoniq.framework.platform:axoniq-platform-client",
+            "io.axoniq.framework.platform:axoniq-platform-spring-boot-autoconfigure",
+            "io.axoniq.framework.platform:axoniq-platform-spring-boot-starter",
+            // Axon Server connector (transitive runtime)
             "io.axoniq:axonserver-connector-java",
-            "io.axoniq.platform:framework-client-messaging",
-            "io.axoniq.platform:framework-client-modelling",
-            "io.axoniq.platform:framework-client-eventsourcing",
-            "io.axoniq.platform:framework-client-spring-boot-starter",
     )
 
     private fun versionInformation(): Versions {
@@ -229,10 +237,10 @@ class SetupPayloadCreator(
     private fun queryBusInformation(): QueryBusInformation {
         val busComponent = configuration.getComponent(QueryBus::class.java)
         val bus = busComponent.unwrapPossiblyDecoratedClass(QueryBus::class.java, listOf("localSegment"))
-        val isDistributed = bus::class.java.name == "org.axonframework.messaging.queryhandling.distributed.DistributedQueryBus"
+        val isDistributed = bus::class.java.name == "io.axoniq.framework.messaging.queryhandling.distributed.DistributedQueryBus"
         val connector = bus.getPropertyValue<QueryBusConnector>("connector")?.unwrapPossiblyDecoratedClass(QueryBusConnector::class.java)
         val axonServer = if (isDistributed && connector != null) {
-            connector::class.java.name == "org.axonframework.axonserver.connector.query.AxonServerQueryBusConnector"
+            connector::class.java.name == "io.axoniq.framework.axonserver.connector.query.AxonServerQueryBusConnector"
         } else false
         val localSegmentType = if (axonServer) bus.getPropertyType("localSegment", QueryBus::class.java) else null
         val context = extractContext(connector)
@@ -263,7 +271,7 @@ class SetupPayloadCreator(
             storageEngine?.getPropertyValue<Any>("connection")?.getPropertyValue<String>("context")
         } else null
         var converter = storageEngine?.getPropertyValue<Any>("converter")
-        if(converter != null && converter::class.java.name == "org.axonframework.axonserver.connector.event.TaggedEventConverter") {
+        if(converter != null && converter::class.java.name == "io.axoniq.framework.axonserver.connector.event.TaggedEventConverter") {
             converter = converter.getPropertyValue<Converter>("converter")
         }
         val realConverter = if(converter is Converter) {
@@ -287,10 +295,10 @@ class SetupPayloadCreator(
     private fun commandBusInformation(): CommandBusInformation {
         val busComponent = configuration.getComponent(CommandBus::class.java)
         val bus = busComponent.unwrapPossiblyDecoratedClass(CommandBus::class.java, listOf("localSegment"))
-        val isDistributed = bus::class.java.name == "org.axonframework.messaging.commandhandling.distributed.DistributedCommandBus"
-        val connector = bus.getPropertyValue<Any>("connector")?.unwrapPossiblyDecoratedClass("org.axonframework.messaging.commandhandling.distributed.CommandBusConnector")
+        val isDistributed = bus::class.java.name == "io.axoniq.framework.messaging.commandhandling.distributed.DistributedCommandBus"
+        val connector = bus.getPropertyValue<Any>("connector")?.unwrapPossiblyDecoratedClass("io.axoniq.framework.messaging.commandhandling.distributed.CommandBusConnector")
         val axonServer = if (isDistributed && connector != null) {
-            connector::class.java.name == "org.axonframework.axonserver.connector.command.AxonServerCommandBusConnector"
+            connector::class.java.name == "io.axoniq.framework.axonserver.connector.command.AxonServerCommandBusConnector"
         } else false
         val localSegmentType = if (axonServer) bus.getPropertyType("localSegment", CommandBus::class.java) else null
         val context = extractContext(connector)
