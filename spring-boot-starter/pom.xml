@@ -32,7 +32,7 @@
     <dependencies>
         <dependency>
             <groupId>io.axoniq.platform</groupId>
-            <artifactId>axoniq-platform-client-api</artifactId>
+            <artifactId>axoniq-platform-framework-client-api</artifactId>
             <version>${project.version}</version>
         </dependency>
         <dependency>

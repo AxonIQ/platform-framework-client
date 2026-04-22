@@ -205,7 +205,7 @@ class SetupPayloadCreator(
             "io.axoniq.framework:axoniq-spring-boot-starter",
             "io.axoniq.framework:axoniq-integrationtests",
             // AxonIQ Platform client
-            "io.axoniq.platform:axoniq-platform-client-api",
+            "io.axoniq.platform:axoniq-platform-framework-client-api",
             "io.axoniq.platform:axoniq-platform-framework-client",
             "io.axoniq.platform:axoniq-platform-spring-boot-starter",
             "io.axoniq.framework.platform:axoniq-platform-client",
