@@ -25,7 +25,7 @@
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
-    <artifactId>framework-client</artifactId>
+    <artifactId>axoniq-platform-framework-client</artifactId>
     <name>Axoniq Platform client</name>
     <description>Axoniq Platform instrumentation for Axon Framework 5. Supports messaging, modelling and event sourcing — modelling and event-sourcing are classpath-optional.</description>
 
@@ -56,7 +56,7 @@
     <dependencies>
         <dependency>
             <groupId>io.axoniq.platform</groupId>
-            <artifactId>framework-client-api</artifactId>
+            <artifactId>axoniq-platform-client-api</artifactId>
             <version>${project.version}</version>
         </dependency>
 

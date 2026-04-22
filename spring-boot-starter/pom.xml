@@ -25,14 +25,14 @@
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
-    <artifactId>framework-client-spring-boot-starter</artifactId>
+    <artifactId>axoniq-platform-spring-boot-starter</artifactId>
     <name>AxonIQ Platform client: Spring Boot Starter</name>
     <description>Spring Boot Starter to auto-connect Axon Framework 5+ applications with Axoniq Platform</description>
 
     <dependencies>
         <dependency>
             <groupId>io.axoniq.platform</groupId>
-            <artifactId>framework-client-api</artifactId>
+            <artifactId>axoniq-platform-client-api</artifactId>
             <version>${project.version}</version>
         </dependency>
         <dependency>
@@ -47,7 +47,7 @@
         </dependency>
         <dependency>
             <groupId>io.axoniq.platform</groupId>
-            <artifactId>framework-client</artifactId>
+            <artifactId>axoniq-platform-framework-client</artifactId>
             <version>${project.version}</version>
         </dependency>
         <dependency>

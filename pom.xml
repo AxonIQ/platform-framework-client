@@ -27,7 +27,7 @@
     <modules>
         <module>framework-client-api</module>
         <module>framework-client</module>
-        <module>framework-client-spring-boot-starter</module>
+        <module>spring-boot-starter</module>
     </modules>
     <packaging>pom</packaging>
 
