@@ -16,6 +16,7 @@
 
 package io.axoniq.platform.framework.eventprocessor
 
+import io.axoniq.platform.framework.api.ProcessingGroupStatus
 import io.axoniq.platform.framework.api.ProcessorMode
 import io.axoniq.platform.framework.api.ProcessorStatus
 import io.axoniq.platform.framework.api.ProcessorStatusReport
@@ -30,9 +31,14 @@ import org.axonframework.messaging.eventhandling.processing.streaming.pooled.Poo
 import org.axonframework.messaging.eventhandling.processing.streaming.segmenting.EventTrackerStatus
 import org.axonframework.messaging.eventhandling.processing.streaming.token.store.TokenStore
 import org.axonframework.messaging.eventhandling.processing.subscribing.SubscribingEventProcessor
+import org.slf4j.LoggerFactory
 
 class ProcessorReportCreator(private val processingConfig: Configuration) {
+    private val logger = LoggerFactory.getLogger(ProcessorReportCreator::class.java)
     private val metricsRegistry = processingConfig.getComponent(ProcessorMetricsRegistry::class.java)
+    // Optional — only present when an addon (currently only axoniq-dead-letter) registers a source.
+    private val processingGroupInfoSource: ProcessingGroupInfoSource? =
+            processingConfig.getOptionalComponent(ProcessingGroupInfoSource::class.java).orElse(null)
     companion object {
         const val MULTI_TENANT_PROCESSOR_CLASS = "org.axonframework.extensions.multitenancy.components.eventhandeling.MultiTenantEventProcessor"
     }
@@ -51,7 +57,7 @@ class ProcessorReportCreator(private val processingConfig: Configuration) {
     private fun streamingStatus(name: String, processor: StreamingEventProcessor) =
         ProcessorStatus(
             name,
-            emptyList(),
+            processingGroupsFor(name),
             processor.tokenStoreIdentifier,
             processor.toType(),
             processor.isRunning,
@@ -60,6 +66,18 @@ class ProcessorReportCreator(private val processingConfig: Configuration) {
             processor.processingStatus().filterValues { !it.isErrorState }.size,
             processor.processingStatus().map { (_, segment) -> segment.toStatus(name) },
         )
+
+    private fun processingGroupsFor(processorName: String): List<ProcessingGroupStatus> {
+        val source = processingGroupInfoSource ?: return emptyList()
+        return try {
+            source.infoFor(processorName)
+                    .map { ProcessingGroupStatus(it.processingGroup, it.dlqSize) }
+        } catch (e: Exception) {
+            // A failing probe must not break processor reporting.
+            logger.warn("Failed to collect processing group information for processor [{}]", processorName, e)
+            emptyList()
+        }
+    }
 
     private fun subscribingStatus(name: String, processor: SubscribingEventProcessor) =
         ProcessorStatus(

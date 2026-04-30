@@ -18,3 +18,4 @@ io.axoniq.platform.framework.AxoniqPlatformConfigurerEnhancer
 io.axoniq.platform.framework.messaging.distributed.AxoniqPlatformDistributedMessagingConfigurerEnhancer
 io.axoniq.platform.framework.modelling.AxoniqPlatformModellingConfigurationEnhancer
 io.axoniq.platform.framework.eventsourcing.AxoniqPlatformEventsourcingConfigurerEnhancer
+io.axoniq.platform.framework.eventprocessor.AxoniqPlatformDeadLetterConfigurerEnhancer
