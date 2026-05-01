@@ -22,13 +22,24 @@ data class RegisteredEntitiesResult(
 
 data class RegisteredEntityInfo(
         val entityType: String,
-        val idTypes: List<String>,
         /**
-         * Structural descriptors of the id class's properties. Empty when the id is a
-         * "simple" type (String, primitives, UUID, etc.) — in that case the frontend should
-         * render a single text input. When populated, the id is a compound type (record /
-         * data class / plain object) and the frontend should render one input per descriptor
-         * and send the entityId as a JSON object keyed by the descriptor names.
+         * All id types registered for this entity. AF5 entities can be addressed by multiple
+         * id types (e.g. one per command in a build agent), each producing different criteria.
+         * The frontend should let the user pick which id type to query against.
+         */
+        val idTypes: List<IdType>,
+)
+
+data class IdType(
+        /** Fully qualified Java type name of the id class. */
+        val type: String,
+        /**
+         * Structural descriptors of the id class's properties. Empty for "simple" types
+         * (String, primitives, UUID, etc.) — frontend renders a single text input. Populated
+         * for compound types (records / data classes / plain objects) — frontend renders one
+         * input per descriptor and sends the entityId as a JSON object keyed by descriptor names.
+         * Only 1-deep properties are described; nested objects are exposed as type "object" and
+         * left for the user to provide as raw JSON.
          */
         val idFields: List<IdFieldDescriptor> = emptyList(),
 )
@@ -44,6 +55,8 @@ data class IdFieldDescriptor(
 data class ModelDomainEventsQuery(
         val entityType: String,
         val entityId: String,
+        /** FQ Java type name of the id type the user selected (must match one of [RegisteredEntityInfo.idTypes].type). */
+        val idType: String,
         val page: Int = 0,
         val pageSize: Int = 10,
 )
@@ -51,12 +64,16 @@ data class ModelDomainEventsQuery(
 data class ModelEntityStateAtSequenceQuery(
         val entityType: String,
         val entityId: String,
+        /** FQ Java type name of the id type the user selected. */
+        val idType: String,
         val maxSequenceNumber: Long = 0,
 )
 
 data class ModelTimelineQuery(
         val entityType: String,
         val entityId: String,
+        /** FQ Java type name of the id type the user selected. */
+        val idType: String,
         val offset: Int = 0,
         val limit: Int = 100,
 )
