@@ -20,7 +20,6 @@ import io.axoniq.platform.framework.client.RSocketHandlerRegistrar
 import io.mockk.mockk
 import org.axonframework.common.configuration.Configuration
 import org.axonframework.eventsourcing.eventstore.EventStorageEngine
-import org.axonframework.modelling.StateManager
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -32,9 +31,8 @@ import java.util.UUID
 
 /**
  * Unit tests for the pure-logic helpers on [RSocketModelInspectionResponder] that don't
- * require a live AF5 configuration / event store. These helpers govern public-facing
- * behaviour (id-type description for the FE form, MessageType-name parsing for handler
- * dispatch) so regressing them silently breaks the inspection UI.
+ * require a live AF5 configuration / event store. These helpers govern the FE id-type form,
+ * so regressing them silently breaks the inspection UI.
  */
 class RSocketModelInspectionResponderHelpersTest {
 
@@ -45,44 +43,10 @@ class RSocketModelInspectionResponderHelpersTest {
         // The helpers under test never reach into these dependencies, so simple unrecorded
         // mocks are enough — we don't need MockK relaxed mocks elsewhere.
         responder = RSocketModelInspectionResponder(
-                stateManager = mockk<StateManager>(),
                 eventStorageEngine = mockk<EventStorageEngine>(),
                 registrar = mockk<RSocketHandlerRegistrar>(),
                 configuration = mockk<Configuration>(),
         )
-    }
-
-    // ---------------------------------------------------------------------------------------
-    //  simpleNameFromMessageType
-    //
-    //  Drives Path B handler resolution in applyEventViaReflection. Must produce the same
-    //  simple name regardless of whether the MessageType.name() is a fully qualified class
-    //  name (default ClassBasedMessageTypeResolver) or a namespaced short name from
-    //  @Event(namespace = ...).
-    // ---------------------------------------------------------------------------------------
-
-    @Test
-    fun `simpleNameFromMessageType strips package for fully qualified class name`() {
-        val name = "io.axoniq.quickstart.reservation.event.ReservationEvents\$SeatReservedEvent"
-        assertEquals("SeatReservedEvent", responder.simpleNameFromMessageType(name))
-    }
-
-    @Test
-    fun `simpleNameFromMessageType strips namespace for short namespaced form`() {
-        // Format produced by @Event(namespace = "quickstart") on a record class
-        assertEquals("OrderCreatedEvent", responder.simpleNameFromMessageType("quickstart.OrderCreatedEvent"))
-    }
-
-    @Test
-    fun `simpleNameFromMessageType is identity for a single segment`() {
-        assertEquals("Foo", responder.simpleNameFromMessageType("Foo"))
-    }
-
-    @Test
-    fun `simpleNameFromMessageType prefers dollar over dot when both present`() {
-        // A nested class with a namespaced prefix would be a strange case but the heuristic
-        // still produces the right simple class name.
-        assertEquals("Inner", responder.simpleNameFromMessageType("quickstart.Outer\$Inner"))
     }
 
     // ---------------------------------------------------------------------------------------

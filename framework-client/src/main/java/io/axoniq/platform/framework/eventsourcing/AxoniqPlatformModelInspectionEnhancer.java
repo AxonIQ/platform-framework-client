@@ -18,39 +18,54 @@ package io.axoniq.platform.framework.eventsourcing;
 
 import io.axoniq.platform.framework.AxoniqPlatformConfigurerEnhancer;
 import io.axoniq.platform.framework.client.RSocketHandlerRegistrar;
-import org.axonframework.common.configuration.ComponentDefinition;
 import org.axonframework.common.configuration.ComponentRegistry;
 import org.axonframework.common.configuration.ConfigurationEnhancer;
-import org.axonframework.common.lifecycle.Phase;
-import org.axonframework.eventsourcing.eventstore.EventStorageEngine;
-import org.axonframework.modelling.StateManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
- * Enhancer that registers the {@link RSocketModelInspectionResponder} when both
- * {@link StateManager} and {@link EventStorageEngine} are available (AF5 applications).
+ * Service-loaded enhancer that wires the {@link RSocketModelInspectionResponder} when the
+ * application has the platform client connected ({@link RSocketHandlerRegistrar} present) and
+ * {@code axon-eventsourcing} is on the classpath.
+ *
+ * <p>This class is deliberately free of direct references to {@code axon-eventsourcing} types
+ * so it can be loaded even when event sourcing is absent from the classpath. The actual
+ * decorator wiring lives in {@link ModelInspectionDecorators} and is only touched after the
+ * runtime classpath probe succeeds.</p>
+ *
+ * <p>We deliberately do <em>not</em> probe for {@code StateManager} either: it's registered by
+ * {@code ModellingConfigurationDefaults} at {@link Integer#MAX_VALUE}, after this enhancer's
+ * order, so the probe would falsely return {@code false} during boot.</p>
  */
 public class AxoniqPlatformModelInspectionEnhancer implements ConfigurationEnhancer {
 
+    private static final Logger logger = LoggerFactory.getLogger(AxoniqPlatformModelInspectionEnhancer.class);
+    private static final String EVENTSOURCING_PROBE_CLASS = "org.axonframework.eventsourcing.eventstore.EventStorageEngine";
+
     @Override
     public void enhance(ComponentRegistry registry) {
-        if (!registry.hasComponent(StateManager.class)
-                || !registry.hasComponent(EventStorageEngine.class)
-                || !registry.hasComponent(RSocketHandlerRegistrar.class)) {
+        if (!registry.hasComponent(RSocketHandlerRegistrar.class)) {
             return;
         }
-
-        registry.registerComponent(ComponentDefinition
-                                           .ofType(RSocketModelInspectionResponder.class)
-                                           .withBuilder(c -> new RSocketModelInspectionResponder(
-                                                   c.getComponent(StateManager.class),
-                                                   c.getComponent(EventStorageEngine.class),
-                                                   c.getComponent(RSocketHandlerRegistrar.class),
-                                                   c))
-                                           .onStart(Phase.EXTERNAL_CONNECTIONS, RSocketModelInspectionResponder::start));
+        if (!isClasspathAvailable()) {
+            logger.debug("axon-eventsourcing not on classpath; skipping model inspection wiring.");
+            return;
+        }
+        ModelInspectionDecorators.apply(registry);
     }
 
     @Override
     public int order() {
         return AxoniqPlatformConfigurerEnhancer.PLATFORM_ENHANCER_ORDER + 1;
+    }
+
+    private static boolean isClasspathAvailable() {
+        try {
+            Class.forName(EVENTSOURCING_PROBE_CLASS, false,
+                          AxoniqPlatformModelInspectionEnhancer.class.getClassLoader());
+            return true;
+        } catch (ClassNotFoundException e) {
+            return false;
+        }
     }
 }

@@ -18,6 +18,7 @@ package io.axoniq.platform.framework
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Timer
 import org.axonframework.common.ReflectionUtils
+import org.axonframework.common.configuration.BaseModule
 import org.axonframework.common.configuration.ComponentRegistry
 import org.axonframework.common.configuration.Module
 import java.lang.reflect.Field
@@ -188,13 +189,19 @@ fun String?.truncateToBytes(maxBytes: Int): String? {
     return truncatedContent + truncationMessage
 }
 
-fun ComponentRegistry.doOnSubModules(block: (ComponentRegistry, Module?) -> Unit) {
+fun ComponentRegistry.doOnSubModules(block: (ComponentRegistry, Module?) -> Unit, recursive: Boolean = true) {
     val modules = this.getPropertyValue<Map<String, Module>>("modules")
     modules?.forEach { entry ->
         val module = entry.value
-        module.getPropertyValue<ComponentRegistry>("componentRegistry")?.let { cr ->
-            block(cr, module)
-            cr.doOnSubModules(block)
+        block(this, module)
+        if (recursive && module is BaseModule<*>) {
+            // BaseModule's nested registry only materialises when the module is built. Defer
+            // the inner walk via the public componentRegistry(action) API; the action runs on
+            // the module's own registry at build time, with arbitrary-depth nesting visible to
+            // recursive doOnSubModules calls inside.
+            module.componentRegistry { innerRegistry ->
+                innerRegistry.doOnSubModules(block, recursive)
+            }
         }
     }
 }
