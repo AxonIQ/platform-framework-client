@@ -23,24 +23,32 @@ import io.mockk.verify
 import org.axonframework.common.configuration.ComponentDefinition
 import org.axonframework.common.configuration.ComponentRegistry
 import org.axonframework.eventsourcing.eventstore.EventStorageEngine
-import org.axonframework.modelling.StateManager
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 
 /**
- * Verifies the registration guard in [AxoniqPlatformModelInspectionEnhancer]: the
- * inspection responder must register only when the application has all three required
- * components (StateManager + EventStorageEngine + RSocketHandlerRegistrar). Missing any
- * of them is the AF4 / non-event-sourced case and registering would NPE on first request.
+ * Verifies the guard in [AxoniqPlatformModelInspectionEnhancer]: the responder must register
+ * only when the platform client is wired ([RSocketHandlerRegistrar] present) and an
+ * [EventStorageEngine] is available. Missing either is the no-event-sourcing / no-platform-client
+ * case where registering would have nothing to act on.
+ *
+ * The enhancer itself does not probe for [EventStorageEngine] directly — it first probes for
+ * {@code axon-eventsourcing} on the classpath and delegates the rest of the wiring to
+ * [ModelInspectionDecorators], which is where the [EventStorageEngine] check lives. In tests
+ * the classpath probe always succeeds (axon-eventsourcing is a test dependency), so we exercise
+ * both branches via the registry mocks.
+ *
+ * StateManager is intentionally NOT probed: ModellingConfigurationDefaults registers it at
+ * Integer.MAX_VALUE, after this enhancer's order, so the probe would falsely return false
+ * during a real boot.
  */
 class AxoniqPlatformModelInspectionEnhancerTest {
 
     private val enhancer = AxoniqPlatformModelInspectionEnhancer()
 
     @Test
-    fun `registers the responder when StateManager, EventStorageEngine and RSocketHandlerRegistrar are all present`() {
+    fun `registers the responder when EventStorageEngine and RSocketHandlerRegistrar are both present`() {
         val registry = mockk<ComponentRegistry>(relaxed = true)
-        every { registry.hasComponent(StateManager::class.java) } returns true
         every { registry.hasComponent(EventStorageEngine::class.java) } returns true
         every { registry.hasComponent(RSocketHandlerRegistrar::class.java) } returns true
 
@@ -50,21 +58,8 @@ class AxoniqPlatformModelInspectionEnhancerTest {
     }
 
     @Test
-    fun `skips registration when StateManager is missing — typical AF4 application`() {
+    fun `skips registration when EventStorageEngine is missing — typical AF4 application`() {
         val registry = mockk<ComponentRegistry>(relaxed = true)
-        every { registry.hasComponent(StateManager::class.java) } returns false
-        every { registry.hasComponent(EventStorageEngine::class.java) } returns true
-        every { registry.hasComponent(RSocketHandlerRegistrar::class.java) } returns true
-
-        enhancer.enhance(registry)
-
-        verify(exactly = 0) { registry.registerComponent(any<ComponentDefinition<*>>()) }
-    }
-
-    @Test
-    fun `skips registration when EventStorageEngine is missing`() {
-        val registry = mockk<ComponentRegistry>(relaxed = true)
-        every { registry.hasComponent(StateManager::class.java) } returns true
         every { registry.hasComponent(EventStorageEngine::class.java) } returns false
         every { registry.hasComponent(RSocketHandlerRegistrar::class.java) } returns true
 
@@ -76,8 +71,6 @@ class AxoniqPlatformModelInspectionEnhancerTest {
     @Test
     fun `skips registration when RSocketHandlerRegistrar is missing — console client not wired`() {
         val registry = mockk<ComponentRegistry>(relaxed = true)
-        every { registry.hasComponent(StateManager::class.java) } returns true
-        every { registry.hasComponent(EventStorageEngine::class.java) } returns true
         every { registry.hasComponent(RSocketHandlerRegistrar::class.java) } returns false
 
         enhancer.enhance(registry)
