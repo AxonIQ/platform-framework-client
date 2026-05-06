@@ -22,7 +22,6 @@ import io.axoniq.framework.messaging.deadletter.SequencedDeadLetterQueue
 import io.axoniq.platform.framework.api.DeadLetterResponse
 import io.axoniq.platform.framework.api.SequenceLettersResponse
 import org.axonframework.common.configuration.Configuration
-import org.axonframework.messaging.eventhandling.EventHandlingComponent
 import org.axonframework.messaging.eventhandling.EventMessage
 import org.slf4j.LoggerFactory
 import java.util.concurrent.TimeUnit
@@ -49,6 +48,17 @@ class DeadLetterManager(
         private val configuration: Configuration,
 ) : ProcessingGroupInfoSource {
 
+    @Volatile
+    private var entries: List<DlqEntry>? = null
+
+    /**
+     * Discovers the DLQs configured on this application by walking each event-processor module.
+     * Called once via the lifecycle; subsequent invocations refresh the cached view.
+     */
+    fun start() {
+        entries = discoverEntries()
+    }
+
     override fun infoFor(processorName: String): List<ProcessingGroupInfoSource.ProcessingGroupInfo> =
             dlqInfoForProcessor(processorName).map {
                 ProcessingGroupInfoSource.ProcessingGroupInfo(it.processingGroup, it.sequenceCount)
@@ -62,8 +72,8 @@ class DeadLetterManager(
             val processingGroup: String,
             val processorName: String,
             val componentName: String,
-            val dlqComponentName: String,
             val dlq: SequencedDeadLetterQueue<EventMessage>,
+            val processor: SequencedDeadLetterProcessor<EventMessage>,
     )
 
     private val dlqNamePattern =
@@ -205,7 +215,7 @@ class DeadLetterManager(
     }
 
     fun process(processingGroup: String, messageIdentifier: String): Boolean {
-        val processor = deadLetterProcessorFor(processingGroup)
+        val processor = dlqFor(processingGroup).processor
         return processor.process { it.message().identifier() == messageIdentifier }
                 .get(60, TimeUnit.SECONDS)
     }
@@ -215,7 +225,7 @@ class DeadLetterManager(
             maxMessages: Int? = null,
             timeoutSeconds: Long = 600,
     ): Int {
-        val processor = deadLetterProcessorFor(processingGroup)
+        val processor = dlqFor(processingGroup).processor
         var processed = 0
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
         while (maxMessages == null || processed < maxMessages) {
@@ -248,84 +258,47 @@ class DeadLetterManager(
                     ?: throw IllegalArgumentException(
                             "There is no dead-letter queue for processing group [$processingGroup]")
 
-    private fun deadLetterProcessorFor(processingGroup: String): SequencedDeadLetterProcessor<EventMessage> {
-        val entry = dlqFor(processingGroup)
-
-        // EventHandlingComponents live in per-processor sub-modules. Direct lookup by name on the
-        // global Configuration only sees the global scope, so we use getComponents(...) — which
-        // (like for SequencedDeadLetterQueue) walks all module scopes — and then pick the entry
-        // whose registered name matches the one encoded inside the DLQ component name.
-        val ehc = configuration
-                .getComponents(EventHandlingComponent::class.java)[entry.dlqComponentName]
-                ?: throw IllegalArgumentException(
-                        "No event handling component registered for [${entry.dlqComponentName}]")
-
-        return findDeadLetterProcessor(ehc)
-                ?: throw IllegalStateException(
-                        "Component [${entry.dlqComponentName}] is not wrapped with dead-letter processing")
-    }
-
-    /**
-     * Walks the [EventHandlingComponent] decorator chain looking for the [SequencedDeadLetterProcessor]
-     * implementation. Other framework-client decorators may wrap the dead-lettering component, hiding it from a direct
-     * cast.
-     */
     @Suppress("UNCHECKED_CAST")
-    private fun findDeadLetterProcessor(root: EventHandlingComponent): SequencedDeadLetterProcessor<EventMessage>? {
-        val seen = mutableSetOf<Any>()
-        var current: Any? = root
-        while (current != null && seen.add(current)) {
-            if (current is SequencedDeadLetterProcessor<*>) {
-                return current as SequencedDeadLetterProcessor<EventMessage>
-            }
-            current = readDelegate(current)
-        }
-        return null
-    }
-
-    private fun readDelegate(target: Any): Any? {
-        var clazz: Class<*>? = target.javaClass
-        while (clazz != null && clazz != Any::class.java) {
-            try {
-                val field = clazz.getDeclaredField("delegate")
-                field.isAccessible = true
-                return field.get(target)
-            } catch (_: NoSuchFieldException) {
-                clazz = clazz.superclass
-            }
-        }
-        return null
-    }
-
-    @Suppress("UNCHECKED_CAST")
-    private fun discover(): List<DlqEntry> {
-        data class ParsedDlq(
+    private fun discoverEntries(): List<DlqEntry> {
+        data class Parsed(
+                val module: Configuration,
                 val processor: String,
                 val component: String,
                 val dlq: SequencedDeadLetterQueue<EventMessage>,
         )
 
-        val parsed = configuration.getComponents(SequencedDeadLetterQueue::class.java)
-                .mapNotNull { (dlqName, dlq) ->
-                    val match = dlqNamePattern.find(dlqName) ?: return@mapNotNull null
-                    ParsedDlq(
-                            processor = match.groupValues[1],
-                            component = match.groupValues[2],
-                            dlq = dlq as SequencedDeadLetterQueue<EventMessage>,
-                    )
-                }
+        val parsed = configuration.moduleConfigurations.flatMap { module ->
+            module.getComponents(SequencedDeadLetterQueue::class.java)
+                    .mapNotNull { (name, dlq) ->
+                        val match = dlqNamePattern.find(name) ?: return@mapNotNull null
+                        Parsed(
+                                module = module,
+                                processor = match.groupValues[1],
+                                component = match.groupValues[2],
+                                dlq = dlq as SequencedDeadLetterQueue<EventMessage>,
+                        )
+                    }
+        }
         val perProcessor = parsed.groupingBy { it.processor }.eachCount()
-        return parsed.map { (processor, component, dlq) ->
+        return parsed.map {
+            val ehcName = "EventHandlingComponent[${it.processor}][${it.component}]"
+            val processor = it.module
+                    .getOptionalComponent(SequencedDeadLetterProcessor::class.java, ehcName)
+                    .orElseThrow {
+                        IllegalStateException(
+                                "Component [$ehcName] is not wrapped with dead-letter processing")
+                    } as SequencedDeadLetterProcessor<EventMessage>
             DlqEntry(
-                    processingGroup = if (perProcessor[processor] == 1) processor else "$processor::$component",
-                    processorName = processor,
-                    componentName = component,
-                    // The DLQ component factory keys EventHandlingComponents by the inner name used in the DLQ key.
-                    dlqComponentName = "EventHandlingComponent[$processor][$component]",
-                    dlq = dlq,
+                    processingGroup = if (perProcessor[it.processor] == 1) it.processor else "${it.processor}::${it.component}",
+                    processorName = it.processor,
+                    componentName = it.component,
+                    dlq = it.dlq,
+                    processor = processor,
             )
         }
     }
+
+    private fun discover(): List<DlqEntry> = entries ?: discoverEntries().also { entries = it }
 
     private fun DeadLetter<out EventMessage>.toApiLetter(sequenceIdentifier: String): ApiDeadLetter {
         val message = this.message()

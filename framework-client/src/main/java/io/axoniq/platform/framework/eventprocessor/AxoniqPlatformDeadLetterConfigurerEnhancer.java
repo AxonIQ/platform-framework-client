@@ -67,7 +67,10 @@ public class AxoniqPlatformDeadLetterConfigurerEnhancer implements Configuration
     private static void register(ComponentRegistry registry) {
         registry.registerComponent(ComponentDefinition
                                            .ofType(DeadLetterManager.class)
-                                           .withBuilder(DeadLetterManager::new));
+                                           .withBuilder(DeadLetterManager::new)
+                                           // Discover DLQs after event processors have started, by which point the
+                                           // EventHandlingComponent decorator chain has materialised every DLQ.
+                                           .onStart(Phase.INSTRUCTION_COMPONENTS, DeadLetterManager::start));
 
         // The Spring-backed ComponentRegistry exposes a registered component under all of its
         // implemented interfaces automatically, so registering DeadLetterManager already makes
