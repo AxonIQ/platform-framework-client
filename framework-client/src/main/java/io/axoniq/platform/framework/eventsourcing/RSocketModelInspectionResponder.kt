@@ -436,8 +436,13 @@ open class RSocketModelInspectionResponder(
 
         val offset = maxOf(0, query.offset)
         val limit = if (query.limit <= 0) 100 else query.limit
-        val maxStateSizeBytes = 100 * 1024
-        val maxEventSizeBytes = 50 * 1024
+        // Per-entry truncation budgets sized so a page-of-100 timeline response stays under
+        // ~2.5 MB pre-gzip (≈ 750 KB post-gzip with the RSocket gzip extension enabled).
+        // Each entry holds an event payload + before + after state — keep events tight (5 KB)
+        // and snapshots conservative (20 KB) since most entities serialize well below either
+        // bound. Larger payloads still come through truncated with a "[truncated]" marker.
+        val maxStateSizeBytes = 20 * 1024
+        val maxEventSizeBytes = 5 * 1024
 
         val entries = mutableListOf<ModelTimelineEntry>()
         val totalEvents = intArrayOf(0)
