@@ -27,6 +27,7 @@ import io.axoniq.platform.framework.client.RSocketHandlerRegistrar;
 import io.axoniq.platform.framework.client.ServerProcessorReporter;
 import io.axoniq.platform.framework.client.SetupPayloadCreator;
 import io.axoniq.platform.framework.client.strategy.CborJackson3EncodingStrategy;
+import io.axoniq.platform.framework.client.strategy.CompressingEncodingStrategy;
 import io.axoniq.platform.framework.client.strategy.RSocketPayloadEncodingStrategy;
 import io.axoniq.platform.framework.eventprocessor.AxoniqPlatformEventHandlingComponent;
 import io.axoniq.platform.framework.eventprocessor.EventProcessorManager;
@@ -88,6 +89,10 @@ public class AxoniqPlatformConfigurerEnhancer implements ConfigurationEnhancer {
                 .registerComponent(ComponentDefinition
                                            .ofType(RSocketPayloadEncodingStrategy.class)
                                            .withBuilder(c -> createEncodingStrategy()))
+                .registerDecorator(DecoratorDefinition.forType(RSocketPayloadEncodingStrategy.class)
+                                                      .with((c, name, delegate) ->
+                                                                    new CompressingEncodingStrategy(delegate, c.getComponent(PlatformClientConnectionService.class)))
+                                                      .order(Integer.MAX_VALUE))
                 .registerComponent(ComponentDefinition
                                            .ofType(RSocketHandlerRegistrar.class)
                                            .withBuilder(c -> new RSocketHandlerRegistrar(c.getComponent(
