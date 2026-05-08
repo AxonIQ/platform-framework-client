@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025. AxonIQ B.V.
+ * Copyright (c) 2022-2026. AxonIQ B.V.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,4 +35,10 @@ data class ClientSettingsV2(
         val processorReportInterval: Long,
         val handlerReportInterval: Long,
         val applicationReportInterval: Long,
+        /**
+         * Codecs the server can decode on inbound frames and produce on outbound. Null when the server is
+         * older and predates compression negotiation; clients must treat null as "no compression".
+         * Values are [CompressionCodec.wireName] tokens, e.g. "gzip".
+         */
+        val supportedCompressionCodecs: List<String>? = null,
 )
