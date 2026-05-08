@@ -83,10 +83,16 @@ class DeadLetterManager(
             processingGroup: String,
             offset: Int = 0,
             size: Int = 25,
-            // TEMPORARILY raised from 10 to 1000 so the platform UI can show the real per-sequence
-            // count instead of the "10+" placeholder. Revert once the response carries an explicit
-            // total-count field per sequence.
-            maxSequenceLetters: Int = 1000,
+            // Per-sequence cap intentionally small. The list query is meant to give the platform UI
+            // a *page* of sequences with enough preview letters to seed the detail modal — not to
+            // ship every letter every refresh. Mitchell observed 7-second refresh cycles on a local
+            // DLQ when this defaulted to 1000 (page-size 25 sequences x up to 1000 letters each =
+            // ~25k letter records serialised on every poll). 10 matches the historical "10+"
+            // placeholder behaviour the platform UI already displays for capped sequences and keeps
+            // the per-letter payload off the hot path. The detail modal pulls full pages lazily
+            // through `sequenceLetters(...)` (FetchDeadLettersForSequence) so long sequences are
+            // still browsable end-to-end without inflating the list query.
+            maxSequenceLetters: Int = 10,
     ): DeadLetterResponse {
         val entry = dlqFor(processingGroup)
         val sequences = entry.dlq.deadLetters(null).join()
