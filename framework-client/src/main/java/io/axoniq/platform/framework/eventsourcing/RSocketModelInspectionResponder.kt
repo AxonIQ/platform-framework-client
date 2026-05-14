@@ -483,6 +483,12 @@ open class RSocketModelInspectionResponder(
 
         val remainingAfterWindow = maxOf(0, totalEvents[0] - offset - entries.size)
         val truncated = remainingAfterWindow > 0
+        // Drop stateBefore on every entry except the first in the page: for i > 0,
+        // entries[i].stateBefore is exactly entries[i-1].stateAfter, so sending both is
+        // redundant. The FE rehydrates the field by looking back one position. On a
+        // page-of-100 with 20 KB snapshots this saves ~99 × 20 KB ≈ 1.9 MB raw per
+        // response (~45% of the pre-gzip envelope).
+        trimRedundantStateBefore(entries)
         logger.info("Sourced [{}] events for timeline of [{}] id [{}] (returning [{}] from offset [{}], truncated={})",
                 totalEvents[0], query.entityType, query.entityId, entries.size, offset, truncated)
 
@@ -494,5 +500,25 @@ open class RSocketModelInspectionResponder(
                 totalEvents = totalEvents[0],
                 truncated = truncated,
         )
+    }
+
+    /**
+     * Blanks the `stateBefore` field on every entry past the first. The FE rehydrates these
+     * positions from the previous entry's `stateAfter` since the two are equal by definition
+     * of event sourcing — so transmitting both is wasted bytes (a 20 KB string per entry).
+     *
+     * The first entry of each page keeps its `stateBefore` because the FE has no in-band
+     * lookback at the page boundary; transmitting it preserves the "show pre-event state" UX
+     * without requiring a separate request for the previous page's tail.
+     *
+     * Visible for tests so the post-processing logic can be exercised without standing up
+     * a full event-sourcing context.
+     */
+    internal fun trimRedundantStateBefore(entries: MutableList<ModelTimelineEntry>) {
+        for (i in 1 until entries.size) {
+            if (entries[i].stateBefore != null) {
+                entries[i] = entries[i].copy(stateBefore = null)
+            }
+        }
     }
 }

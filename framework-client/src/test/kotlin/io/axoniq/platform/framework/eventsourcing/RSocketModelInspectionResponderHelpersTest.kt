@@ -16,12 +16,14 @@
 
 package io.axoniq.platform.framework.eventsourcing
 
+import io.axoniq.platform.framework.api.ModelTimelineEntry
 import io.axoniq.platform.framework.client.RSocketHandlerRegistrar
 import io.mockk.mockk
 import org.axonframework.common.configuration.Configuration
 import org.axonframework.eventsourcing.eventstore.EventStorageEngine
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -140,6 +142,73 @@ class RSocketModelInspectionResponderHelpersTest {
         assertEquals(listOf("tenant", "code"), descriptors.map { it.name })
         assertEquals(listOf("string", "number"), descriptors.map { it.type })
     }
+
+    // ---------------------------------------------------------------------------------------
+    //  trimRedundantStateBefore
+    //
+    //  Trims stateBefore from every entry past the first in a page. The FE rehydrates these
+    //  positions from the previous entry's stateAfter, so transmitting both is wasted bytes.
+    //  Regressing this silently doubles a page-of-100 timeline response (~1.9 MB pre-gzip).
+    // ---------------------------------------------------------------------------------------
+
+    @Test
+    fun `trimRedundantStateBefore keeps stateBefore on the first entry and nulls the rest`() {
+        val entries = mutableListOf(
+                entry(seq = 0, before = "{\"v\":\"initial\"}", after = "{\"v\":\"a\"}"),
+                entry(seq = 1, before = "{\"v\":\"a\"}", after = "{\"v\":\"b\"}"),
+                entry(seq = 2, before = "{\"v\":\"b\"}", after = "{\"v\":\"c\"}"),
+        )
+
+        responder.trimRedundantStateBefore(entries)
+
+        assertEquals("{\"v\":\"initial\"}", entries[0].stateBefore)
+        assertNull(entries[1].stateBefore)
+        assertNull(entries[2].stateBefore)
+        // stateAfter and the other fields must survive untouched — the FE relies on the after
+        // chain for its lookback rehydration.
+        assertEquals("{\"v\":\"a\"}", entries[0].stateAfter)
+        assertEquals("{\"v\":\"b\"}", entries[1].stateAfter)
+        assertEquals("{\"v\":\"c\"}", entries[2].stateAfter)
+    }
+
+    @Test
+    fun `trimRedundantStateBefore is a no-op on an empty page`() {
+        val entries = mutableListOf<ModelTimelineEntry>()
+        responder.trimRedundantStateBefore(entries)
+        assertTrue(entries.isEmpty())
+    }
+
+    @Test
+    fun `trimRedundantStateBefore is a no-op on a single-entry page (no later entries to trim)`() {
+        val entries = mutableListOf(entry(seq = 0, before = "{\"v\":\"only\"}", after = "{\"v\":\"a\"}"))
+        responder.trimRedundantStateBefore(entries)
+        assertEquals("{\"v\":\"only\"}", entries[0].stateBefore)
+    }
+
+    @Test
+    fun `trimRedundantStateBefore leaves an already-null stateBefore alone`() {
+        // The very first event of an entity has no prior state, so the upstream collector
+        // may already emit stateBefore = null. The trim must not throw on that path.
+        val entries = mutableListOf(
+                entry(seq = 0, before = null, after = "{\"v\":\"a\"}"),
+                entry(seq = 1, before = "{\"v\":\"a\"}", after = "{\"v\":\"b\"}"),
+        )
+
+        responder.trimRedundantStateBefore(entries)
+
+        assertNull(entries[0].stateBefore)
+        assertNull(entries[1].stateBefore)
+    }
+
+    private fun entry(seq: Long, before: String?, after: String?): ModelTimelineEntry =
+            ModelTimelineEntry(
+                    sequenceNumber = seq,
+                    timestamp = "2026-01-01T00:00:00Z",
+                    eventType = "SampleEvent",
+                    eventPayload = "{}",
+                    stateBefore = before,
+                    stateAfter = after,
+            )
 
     // ---------------------------------------------------------------------------------------
     //  Test fixtures
