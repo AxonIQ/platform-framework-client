@@ -35,21 +35,27 @@ final class ModellingDecorators {
 
     static void apply(ComponentRegistry registry) {
         registry.registerDecorator(DecoratorDefinition.forType(StateManager.class)
-                                                      .with((cc, name, delegate) ->
-                                                                    new AxoniqPlatformStateManager(delegate))
+                                                      .with((cc, name, delegate) -> {
+                                                          if(delegate instanceof AxoniqPlatformStateManager) {
+                                                              return delegate;
+                                                          }
+                                                          return new AxoniqPlatformStateManager(delegate);
+                                                      })
                                                       .order(Integer.MAX_VALUE));
 
         UtilsKt.doOnSubModules(registry, (componentRegistry, module) -> {
             componentRegistry
                     .registerDecorator(DecoratorDefinition.forType(Repository.class)
                                                           .with((cc, name, delegate) ->
+                                                                        delegate instanceof AxoniqPlatformRepository<?,?> ? delegate :
                                                                         new AxoniqPlatformRepository<>(delegate))
                                                           .order(Integer.MIN_VALUE))
                     .registerDecorator(DecoratorDefinition.forType(StateManager.class)
                                                           .with((cc, name, delegate) ->
+                                                                  delegate instanceof AxoniqPlatformStateManager ?  delegate :
                                                                         new AxoniqPlatformStateManager(delegate))
                                                           .order(Integer.MAX_VALUE));
             return null;
-        });
+        }, true);
     }
 }

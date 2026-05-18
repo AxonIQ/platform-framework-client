@@ -81,7 +81,8 @@ class SetupPayloadCreator(
                         heartbeat = true,
                         threadDump = true,
                         clientStatusUpdates = true,
-                        licenseEntitlement = hasEntitlementManager()
+                        licenseEntitlement = hasEntitlementManager(),
+                        modelInspection = hasStateManager(),
                 )
         )
     }
@@ -345,6 +346,18 @@ class SetupPayloadCreator(
         ))?.javaClass?.simpleName?.let { SerializerInformation(type = it, false) }
     }
 
+
+    /**
+     * Checks whether a StateManager has been registered, indicating AF5 model inspection support.
+     */
+    private fun hasStateManager(): Boolean {
+        try {
+            val stateManagerClass = Class.forName("org.axonframework.modelling.StateManager")
+            return configuration.hasComponent(stateManagerClass)
+        } catch (_: ClassNotFoundException) {
+            return false
+        }
+    }
 
     /**
      * Checks whether the PlatformLicenseSource have been configured, in which case we want updates of licenses from Platform.

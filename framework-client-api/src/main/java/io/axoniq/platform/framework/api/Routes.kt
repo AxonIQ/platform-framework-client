@@ -75,6 +75,13 @@ object Routes {
         const val ENTITY_STATE_AT_SEQUENCE = "entity-state-at-sequence"
     }
 
+    object Model {
+        const val REGISTERED_ENTITIES = "model-registered-entities"
+        const val DOMAIN_EVENTS = "model-domain-events"
+        const val ENTITY_STATE_AT_SEQUENCE = "model-entity-state-at-sequence"
+        const val REPLAY_TIMELINE = "model-replay-timeline"
+    }
+
     object MessageFlow {
         const val STATS = "message-flow-stats"
     }
