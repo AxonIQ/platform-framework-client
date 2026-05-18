@@ -57,6 +57,9 @@ object Routes {
         object DeadLetter {
             const val LETTERS = "dlq-query-dead-letters"
             const val SEQUENCE_SIZE = "dlq-query-dead-letter-sequence-size"
+            // Paginated lookup of letters within a single sequence — added in AF5 framework-client
+            // 5.1.0 so the platform UI can browse very long sequences without loading them all.
+            const val SEQUENCE_LETTERS = "dlq-query-dead-letter-sequence-letters"
 
             const val DELETE_SEQUENCE = "dlq-command-delete-sequence"
             const val DELETE_ALL_SEQUENCES = "dlq-command-delete-all-sequences"
