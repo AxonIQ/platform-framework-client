@@ -66,9 +66,25 @@ class DeadLetterManager @JvmOverloads constructor(
     /**
      * Discovers the DLQs configured on this application by walking each event-processor module.
      * Called once via the lifecycle; subsequent invocations refresh the cached view.
+     *
+     * Also logs the active [dlqMode] at INFO so operators can confirm from application logs that the
+     * configured exposure level (`axoniq.platform.dlq-mode`) has actually taken effect. When the mode
+     * deviates from the default `FULL` we surface a warning so accidental misconfiguration (e.g. a
+     * forgotten `MASKED` override) is hard to miss in production logs.
      */
     fun start() {
         entries = discoverEntries()
+        when (dlqMode) {
+            AxoniqConsoleDlqMode.FULL -> logger.info(
+                    "AxoniqPlatform DLQ inspection initialised in FULL mode — payloads, causes and diagnostics are exposed verbatim.")
+            AxoniqConsoleDlqMode.LIMITED -> logger.warn(
+                    "AxoniqPlatform DLQ inspection initialised in LIMITED mode — payloads are hidden; diagnostics are filtered through whitelist {} (empty whitelist removes all diagnostic entries).",
+                    dlqDiagnosticsWhitelist)
+            AxoniqConsoleDlqMode.MASKED -> logger.warn(
+                    "AxoniqPlatform DLQ inspection initialised in MASKED mode — sequence ids are SHA-256 hashed; payloads, causes and diagnostics are not exposed. Operator delete/process actions still work via the hashed identifier.")
+            AxoniqConsoleDlqMode.NONE -> logger.warn(
+                    "AxoniqPlatform DLQ inspection initialised in NONE mode — only sequence counts are exposed. List queries return empty results regardless of letter contents.")
+        }
     }
 
     override fun infoFor(processorName: String): List<ProcessingGroupInfoSource.ProcessingGroupInfo> =
@@ -114,10 +130,15 @@ class DeadLetterManager @JvmOverloads constructor(
                 .take(size)
                 .map { sequence ->
                     val letters = sequence.toList()
-                    val sequenceId = letters.firstOrNull()?.let { sequenceIdentifierFor(entry, it) } ?: ""
+                    // Compute the API-side sequence id ONCE here: raw policy result, hashed in MASKED.
+                    // toApiLetter then just passes this through verbatim, avoiding the double-hash
+                    // that would otherwise hit letters in the lettersForSequence response (where the
+                    // incoming sequenceIdentifier is already hashed).
+                    val rawSequenceId = letters.firstOrNull()?.let { sequenceIdentifierFor(entry, it) } ?: ""
+                    val apiSequenceId = if (dlqMode == AxoniqConsoleDlqMode.MASKED) rawSequenceId.hashed() else rawSequenceId
                     letters
                             .take(maxSequenceLetters)
-                            .map { it.toApiLetter(sequenceId) }
+                            .map { it.toApiLetter(apiSequenceId) }
                 }
         val total = entry.dlq.amountOfSequences(null).join()
         return DeadLetterResponse(pageOfSequences, total)
@@ -227,6 +248,10 @@ class DeadLetterManager @JvmOverloads constructor(
             sequenceIdentifier: String,
     ): List<DeadLetter<out EventMessage>>? {
         val sequences = entry.dlq.deadLetters(null).join()
+        // Track candidates so we can log a diagnostic when nothing matches — the most common cause
+        // is a stale identifier (the sequence's first letter has changed) or a mode mismatch between
+        // the value the UI cached and what the manager now computes. Capped to keep log noise low.
+        val candidates = mutableListOf<String>()
         for (sequence in sequences) {
             val letters = sequence.toList()
             val firstLetter = letters.firstOrNull() ?: continue
@@ -235,7 +260,17 @@ class DeadLetterManager @JvmOverloads constructor(
             if (candidateId == sequenceIdentifier) {
                 return letters
             }
+            if (candidates.size < 5) candidates.add(candidateId)
         }
+        logger.warn(
+                "DLQ findSequence: no sequence in [{}] matches id [{}] (dlqMode={}, scanned {} sequence(s), first {} candidate id(s): {}). Operator's view may be stale, or the first letter of the sequence has changed since the list query.",
+                entry.processingGroup,
+                sequenceIdentifier,
+                dlqMode,
+                candidates.size,
+                candidates.size,
+                candidates,
+        )
         return null
     }
 
@@ -358,6 +393,8 @@ class DeadLetterManager @JvmOverloads constructor(
 
     private fun DeadLetter<out EventMessage>.toApiLetter(sequenceIdentifier: String): ApiDeadLetter {
         val message = this.message()
+        // `sequenceIdentifier` is expected to be in its final API form (hashed in MASKED, raw in FULL/
+        // LIMITED). Hashing is the caller's responsibility — see `deadLetters(...)`.
         return when (dlqMode) {
             AxoniqConsoleDlqMode.NONE,
             AxoniqConsoleDlqMode.MASKED -> ApiDeadLetter(
@@ -369,7 +406,7 @@ class DeadLetterManager @JvmOverloads constructor(
                     enqueuedAt = this.enqueuedAt(),
                     lastTouched = this.lastTouched(),
                     diagnostics = emptyMap<String, Any>(),
-                    sequenceIdentifier = sequenceIdentifier.hashed(),
+                    sequenceIdentifier = sequenceIdentifier,
             )
             AxoniqConsoleDlqMode.LIMITED -> ApiDeadLetter(
                     messageIdentifier = message.identifier(),

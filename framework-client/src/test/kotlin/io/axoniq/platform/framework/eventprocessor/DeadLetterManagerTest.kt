@@ -579,6 +579,29 @@ class DeadLetterManagerTest {
         }
 
         @Test
+        fun `MASKED lettersForSequence returns the paginated slice when looked up by the hashed id`() {
+            // Regression: the detail modal sends the hashed sequence id back; the manager must
+            // re-hash candidate ids while walking the DLQ so the lookup succeeds and the modal
+            // doesn't render an empty slice.
+            val letters = (1..5).map { fakeLetter("m$it", payload = "payload-$it") }
+            val dlq = fakeDlq(sequences = listOf(letters))
+            val ehc = ehcWithPolicy { _ -> "saga-abc" }
+            val manager = managerWith(
+                    "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to dlq,
+                    ehc = ehc,
+                    dlqMode = AxoniqConsoleDlqMode.MASKED,
+            )
+            val hashedId = DigestUtils.sha256Hex("saga-abc")
+
+            val response = manager.lettersForSequence("orders", hashedId, offset = 0, size = 3)
+
+            assertEquals(5L, response.totalCount)
+            assertEquals(3, response.letters.size)
+            // Every letter in the response carries the hashed id verbatim — no double-hashing.
+            response.letters.forEach { assertEquals(hashedId, it.sequenceIdentifier) }
+        }
+
+        @Test
         fun `FULL preserves payload, cause message and raw sequence id`() {
             val sequence = listOf(fakeLetter("m1", payload = "fully-visible"))
             val ehc = ehcWithPolicy { _ -> "saga-99" }

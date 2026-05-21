@@ -16,7 +16,9 @@
 
 package io.axoniq.platform.framework.client
 
+import io.axoniq.platform.framework.AxoniqPlatformConfiguration
 import io.axoniq.platform.framework.api.AxonServerEventStoreMessageSourceInformation
+import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode
 import io.axoniq.platform.framework.api.CommandBusInformation
 import io.axoniq.platform.framework.api.CommonProcessorInformation
 import io.axoniq.platform.framework.api.EventProcessorInformation
@@ -81,7 +83,8 @@ class SetupPayloadCreator(
                         heartbeat = true,
                         threadDump = true,
                         clientStatusUpdates = true,
-                        licenseEntitlement = hasEntitlementManager()
+                        licenseEntitlement = hasEntitlementManager(),
+                        deadLetterQueuesInsights = axoniqPlatformConfiguration()?.dlqMode ?: AxoniqConsoleDlqMode.FULL,
                 )
         )
     }
@@ -345,6 +348,16 @@ class SetupPayloadCreator(
         ))?.javaClass?.simpleName?.let { SerializerInformation(type = it, false) }
     }
 
+
+    /**
+     * Resolves the [AxoniqPlatformConfiguration] from the application configuration, returning `null`
+     * when the platform module hasn't been wired (legacy or non-Spring setups). The caller falls back
+     * to a sensible default (`FULL`) so existing applications keep their current visibility — only
+     * applications that explicitly opt into a restrictive mode (`LIMITED`/`MASKED`/`NONE`) will see
+     * the corresponding gates applied in the platform UI.
+     */
+    private fun axoniqPlatformConfiguration(): AxoniqPlatformConfiguration? =
+            configuration.getOptionalComponent(AxoniqPlatformConfiguration::class.java).orElse(null)
 
     /**
      * Checks whether the PlatformLicenseSource have been configured, in which case we want updates of licenses from Platform.

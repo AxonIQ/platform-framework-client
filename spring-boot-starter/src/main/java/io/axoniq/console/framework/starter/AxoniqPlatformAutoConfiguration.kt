@@ -56,6 +56,8 @@ class AxoniqPlatformAutoConfiguration {
                 .host(properties.host)
                 .secure(properties.isSecure)
                 .initialDelay(properties.initialDelay)
+                .dlqMode(properties.dlqMode)
+                .also { properties.dlqDiagnosticsWhitelist.forEach(it::addDlqDiagnosticsWhitelistKey) }
     }
 
     private fun getApplicationName(
