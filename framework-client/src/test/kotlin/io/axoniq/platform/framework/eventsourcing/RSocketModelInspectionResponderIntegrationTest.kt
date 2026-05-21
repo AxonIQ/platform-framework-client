@@ -16,6 +16,7 @@
 
 package io.axoniq.platform.framework.eventsourcing
 
+import io.axoniq.platform.framework.api.DomainEventAccessMode
 import io.axoniq.platform.framework.api.ModelDomainEventsQuery
 import io.axoniq.platform.framework.api.ModelEntityStateAtSequenceQuery
 import io.axoniq.platform.framework.api.ModelTimelineQuery
@@ -79,6 +80,11 @@ class RSocketModelInspectionResponderIntegrationTest {
                 .componentRegistry { cr ->
                     cr.registerComponent(ComponentDefinition.ofType(RSocketHandlerRegistrar::class.java)
                             .withBuilder { RSocketHandlerRegistrar(CborJackson3EncodingStrategy()) })
+                    // Default to FULL in tests: most assertions below exercise the happy-path
+                    // payload + state visibility. The dedicated access-mode gating tests
+                    // register their own mode via a separate configuration setup.
+                    cr.registerComponent(ComponentDefinition.ofType(DomainEventAccessMode::class.java)
+                            .withBuilder { DomainEventAccessMode.FULL })
                 }
                 .start()
 
@@ -198,16 +204,20 @@ class RSocketModelInspectionResponderIntegrationTest {
     // ------------------------------------------------------------------------------------------
 
     @Test
-    fun `timeline replay produces stateBefore and stateAfter pairs for every event`() {
+    fun `timeline replay sends stateBefore only on the first entry and chains state via stateAfter for the rest`() {
+        // Wire-level optimization (Mitchell #146 follow-up): the responder drops stateBefore on
+        // every entry past the first because it equals the previous entry's stateAfter by
+        // definition of event sourcing. The FE rehydrates it during consumption. Here we assert
+        // both halves of that contract: leading entry carries the value, the rest are null,
+        // and the chain of stateAfter values matches the expected state evolution.
         val result = responder.handleTimelineReplay(timelineQuery("RES-1"))
 
         assertEquals(3, result.totalEvents)
         assertEquals(3, result.entries.size)
 
         // Event 0 — AF5's factory has just created the entity (defaults applied: status=CREATED,
-        // eventCount=0, customerId=null) BEFORE the @EventSourcingHandler runs. So stateBefore
-        // captures that just-constructed shape; stateAfter captures the post-handler state with
-        // customerId set and eventCount=1.
+        // eventCount=0, customerId=null) BEFORE the @EventSourcingHandler runs. stateBefore IS
+        // sent for the leading entry — the FE has no prior entry to look back at.
         val first = result.entries[0]
         assertEquals(0L, first.sequenceNumber)
         assertEquals(ReservationCreated::class.java.name, first.eventType)
@@ -217,17 +227,21 @@ class RSocketModelInspectionResponderIntegrationTest {
         assertNotNull(first.stateAfter)
         assertTrue(first.stateAfter!!.contains("\"eventCount\":1"))
         assertTrue(first.stateAfter!!.contains("\"customerId\":\"alice\""))
+        // entries[0].stateAfter is the implicit "before" for entries[1] — it must carry the
+        // post-Created state so the FE can render the transition into Confirmed.
+        assertTrue(first.stateAfter!!.contains("\"status\":\"CREATED\""))
 
-        // Event 1 — stateBefore = CREATED, stateAfter = CONFIRMED.
+        // Event 1 — server stops sending stateBefore. The CONFIRMED transition is verified by
+        // reading stateAfter and pairing it with entries[0].stateAfter above.
         val second = result.entries[1]
         assertEquals(1L, second.sequenceNumber)
-        assertTrue(second.stateBefore!!.contains("\"status\":\"CREATED\""))
+        assertNull(second.stateBefore, "stateBefore is rehydrated by the FE from entries[0].stateAfter")
         assertTrue(second.stateAfter!!.contains("\"status\":\"CONFIRMED\""))
 
-        // Event 2 — stateBefore = CONFIRMED, stateAfter = CANCELLED.
+        // Event 2 — same contract: server skips stateBefore, FE pairs with entries[1].stateAfter.
         val third = result.entries[2]
         assertEquals(2L, third.sequenceNumber)
-        assertTrue(third.stateBefore!!.contains("\"status\":\"CONFIRMED\""))
+        assertNull(third.stateBefore, "stateBefore is rehydrated by the FE from entries[1].stateAfter")
         assertTrue(third.stateAfter!!.contains("\"status\":\"CANCELLED\""))
     }
 

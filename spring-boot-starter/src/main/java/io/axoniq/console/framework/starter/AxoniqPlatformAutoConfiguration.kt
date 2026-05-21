@@ -56,6 +56,7 @@ class AxoniqPlatformAutoConfiguration {
                 .host(properties.host)
                 .secure(properties.isSecure)
                 .initialDelay(properties.initialDelay)
+                .domainEventAccessMode(properties.domainEventAccessMode)
     }
 
     private fun getApplicationName(

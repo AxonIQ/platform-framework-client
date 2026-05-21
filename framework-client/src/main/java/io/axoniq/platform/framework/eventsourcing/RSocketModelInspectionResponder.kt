@@ -34,6 +34,7 @@ import java.util.*
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.function.BiConsumer
+import kotlin.jvm.optionals.getOrNull
 
 open class RSocketModelInspectionResponder(
         @Suppress("unused") private val eventStorageEngine: EventStorageEngine,
@@ -56,6 +57,37 @@ open class RSocketModelInspectionResponder(
     private val unitOfWorkFactory: UnitOfWorkFactory by lazy {
         configuration.getComponent(UnitOfWorkFactory::class.java)
     }
+
+    /**
+     * Privacy gate read once at first access from the Configuration. Falls back to
+     * [DomainEventAccessMode.NONE] when no mode was registered, matching the AF4
+     * console-framework-client contract: payloads and state are redacted unless the operator
+     * explicitly opts in.
+     *
+     * Visible for tests so gating can be exercised by registering a custom mode in the
+     * configuration mock.
+     */
+    internal val accessMode: DomainEventAccessMode by lazy {
+        configuration.getOptionalComponent(DomainEventAccessMode::class.java).getOrNull()
+                ?: DomainEventAccessMode.NONE
+    }
+
+    /**
+     * True if the configured mode lets the FE see event payloads on the domain-events /
+     * timeline routes. Visible for unit tests so the gate semantics can be exercised without
+     * a live event-sourcing configuration.
+     */
+    internal fun mayShowPayload(): Boolean =
+            accessMode == DomainEventAccessMode.FULL ||
+                    accessMode == DomainEventAccessMode.PREVIEW_PAYLOAD_ONLY
+
+    /**
+     * True if the configured mode lets the FE see reconstructed state on the state-at-sequence /
+     * timeline routes. Visible for unit tests, see [mayShowPayload].
+     */
+    internal fun mayShowState(): Boolean =
+            accessMode == DomainEventAccessMode.FULL ||
+                    accessMode == DomainEventAccessMode.LOAD_DOMAIN_STATE_ONLY
 
     /**
      * Repositories collected at boot from each event-sourced submodule via the decorator hook
@@ -343,6 +375,9 @@ open class RSocketModelInspectionResponder(
         val typedId = deserializeEntityId(query.entityId, idClass)
                 ?: throw IllegalArgumentException("Could not deserialize id [${query.entityId}] as [${query.idType}]")
 
+        // Cache the gate so the inner loop doesn't repeatedly re-read accessMode.
+        val includePayload = mayShowPayload()
+
         val collected = mutableListOf<DomainEvent>()
         try {
             withInspectionUoW(
@@ -353,7 +388,11 @@ open class RSocketModelInspectionResponder(
                                 sequenceNumber = collected.size.toLong(),
                                 timestamp = event.timestamp(),
                                 payloadType = extractPayloadTypeName(event),
-                                payload = extractPayloadAsString(event),
+                                // Redact payload when the operator hasn't opted in (NONE or
+                                // LOAD_DOMAIN_STATE_ONLY) — mirrors the AF4 console-framework-client
+                                // contract. Metadata (sequence, timestamp, type) still flows so the
+                                // FE can render the event list skeleton.
+                                payload = if (includePayload) extractPayloadAsString(event) else null,
                         )
                     },
                     extract = {},
@@ -381,6 +420,18 @@ open class RSocketModelInspectionResponder(
     internal fun handleEntityStateAtSequence(query: ModelEntityStateAtSequenceQuery): EntityStateResult {
         logger.info("Handling Axoniq Platform MODEL_ENTITY_STATE_AT_SEQUENCE query for entity [{}] id [{}] idType [{}] seq [{}]",
                 query.entityType, query.entityId, query.idType, query.maxSequenceNumber)
+
+        // Short-circuit when the operator hasn't opted into state reconstruction. Returning a
+        // null state preserves the route shape so the FE can still surface "redacted" UI
+        // without a separate error path — same approach the AF4 client took.
+        if (!mayShowState()) {
+            return EntityStateResult(
+                    type = query.entityType,
+                    entityId = query.entityId,
+                    maxSequenceNumber = query.maxSequenceNumber,
+                    state = null,
+            )
+        }
 
         val entityClass = Class.forName(query.entityType)
         val idClass = Class.forName(query.idType)
@@ -444,6 +495,14 @@ open class RSocketModelInspectionResponder(
         val maxStateSizeBytes = 20 * 1024
         val maxEventSizeBytes = 5 * 1024
 
+        // Cache the gates once. The timeline path crosses event and state visibility
+        // independently — PREVIEW_PAYLOAD_ONLY shows payloads but redacts state, and
+        // LOAD_DOMAIN_STATE_ONLY does the opposite. Reading the mode per entry would
+        // amplify the per-page hashmap lookup; locking it once is enough since access
+        // mode doesn't change mid-call.
+        val includePayload = mayShowPayload()
+        val includeState = mayShowState()
+
         val entries = mutableListOf<ModelTimelineEntry>()
         val totalEvents = intArrayOf(0)
         // BEFORE/AFTER snapshots have to be paired — capture stateBefore in BEFORE_CONSUMER so it
@@ -456,7 +515,12 @@ open class RSocketModelInspectionResponder(
                     typedId = typedId,
                     beforeConsumer = { event, stateBefore ->
                         pending[0] = event
-                        pending[1] = stateAsJson(stateBefore).truncateToBytes(maxStateSizeBytes)
+                        // Only do the (potentially expensive) state serialization when the
+                        // operator opted into state — otherwise leave the slot null and the
+                        // outbound entry's stateBefore stays null too.
+                        pending[1] = if (includeState) {
+                            stateAsJson(stateBefore).truncateToBytes(maxStateSizeBytes)
+                        } else null
                     },
                     afterConsumer = { event, stateAfter ->
                         val seq = totalEvents[0].toLong()
@@ -466,9 +530,13 @@ open class RSocketModelInspectionResponder(
                                     sequenceNumber = seq,
                                     timestamp = event.timestamp().toString(),
                                     eventType = extractPayloadTypeName(event),
-                                    eventPayload = extractPayloadAsString(event).truncateToBytes(maxEventSizeBytes),
+                                    eventPayload = if (includePayload) {
+                                        extractPayloadAsString(event).truncateToBytes(maxEventSizeBytes)
+                                    } else null,
                                     stateBefore = pending[1] as String?,
-                                    stateAfter = stateAsJson(stateAfter).truncateToBytes(maxStateSizeBytes),
+                                    stateAfter = if (includeState) {
+                                        stateAsJson(stateAfter).truncateToBytes(maxStateSizeBytes)
+                                    } else null,
                             )
                         }
                         pending[0] = null

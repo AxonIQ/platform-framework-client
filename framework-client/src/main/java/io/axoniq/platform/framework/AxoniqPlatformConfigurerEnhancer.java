@@ -16,6 +16,7 @@
 
 package io.axoniq.platform.framework;
 
+import io.axoniq.platform.framework.api.DomainEventAccessMode;
 import io.axoniq.platform.framework.application.ApplicationMetricRegistry;
 import io.axoniq.platform.framework.application.ApplicationMetricReporter;
 import io.axoniq.platform.framework.application.ApplicationReportCreator;
@@ -63,6 +64,10 @@ public class AxoniqPlatformConfigurerEnhancer implements ConfigurationEnhancer {
             return;
         }
         registry
+                .registerComponent(ComponentDefinition
+                                           .ofType(DomainEventAccessMode.class)
+                                           .withBuilder(c -> c.getComponent(AxoniqPlatformConfiguration.class)
+                                                              .getDomainEventAccessMode()))
                 .registerComponent(ComponentDefinition
                                            .ofType(PlatformClientConnectionService.class)
                                            .withBuilder(c -> new PlatformClientConnectionService()))

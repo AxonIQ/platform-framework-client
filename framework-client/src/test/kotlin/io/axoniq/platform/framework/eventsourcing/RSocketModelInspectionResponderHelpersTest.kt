@@ -16,11 +16,14 @@
 
 package io.axoniq.platform.framework.eventsourcing
 
+import io.axoniq.platform.framework.api.DomainEventAccessMode
 import io.axoniq.platform.framework.api.ModelTimelineEntry
 import io.axoniq.platform.framework.client.RSocketHandlerRegistrar
+import io.mockk.every
 import io.mockk.mockk
 import org.axonframework.common.configuration.Configuration
 import org.axonframework.eventsourcing.eventstore.EventStorageEngine
+import java.util.Optional
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
@@ -209,6 +212,74 @@ class RSocketModelInspectionResponderHelpersTest {
                     stateBefore = before,
                     stateAfter = after,
             )
+
+    // ---------------------------------------------------------------------------------------
+    //  accessMode gates (mayShowPayload / mayShowState)
+    //
+    //  Mirror the AF4 console-framework-client contract:
+    //    FULL                     -> payload + state both visible
+    //    PREVIEW_PAYLOAD_ONLY     -> payload visible, state hidden
+    //    LOAD_DOMAIN_STATE_ONLY   -> state visible, payload hidden
+    //    NONE (default)           -> both hidden
+    //
+    //  Each test builds its own responder with a freshly-mocked Configuration so the lazy
+    //  accessMode read picks up the per-test mode.
+    // ---------------------------------------------------------------------------------------
+
+    @Test
+    fun `accessMode defaults to NONE when no DomainEventAccessMode is registered`() {
+        // Privacy-first: if the operator never set a mode (or the platform wiring forgot to
+        // bridge the property), the responder must lock both gates closed.
+        val responderForMode = responderForAccessMode(null)
+        assertFalse(responderForMode.mayShowPayload())
+        assertFalse(responderForMode.mayShowState())
+        assertEquals(DomainEventAccessMode.NONE, responderForMode.accessMode)
+    }
+
+    @Test
+    fun `accessMode FULL opens both payload and state gates`() {
+        val responderForMode = responderForAccessMode(DomainEventAccessMode.FULL)
+        assertTrue(responderForMode.mayShowPayload())
+        assertTrue(responderForMode.mayShowState())
+    }
+
+    @Test
+    fun `accessMode PREVIEW_PAYLOAD_ONLY opens payload only`() {
+        val responderForMode = responderForAccessMode(DomainEventAccessMode.PREVIEW_PAYLOAD_ONLY)
+        assertTrue(responderForMode.mayShowPayload())
+        assertFalse(responderForMode.mayShowState())
+    }
+
+    @Test
+    fun `accessMode LOAD_DOMAIN_STATE_ONLY opens state only`() {
+        val responderForMode = responderForAccessMode(DomainEventAccessMode.LOAD_DOMAIN_STATE_ONLY)
+        assertFalse(responderForMode.mayShowPayload())
+        assertTrue(responderForMode.mayShowState())
+    }
+
+    @Test
+    fun `accessMode NONE explicitly registered keeps both gates closed`() {
+        val responderForMode = responderForAccessMode(DomainEventAccessMode.NONE)
+        assertFalse(responderForMode.mayShowPayload())
+        assertFalse(responderForMode.mayShowState())
+    }
+
+    /**
+     * Builds a fresh responder whose [Configuration] yields [mode] for the
+     * [DomainEventAccessMode] lookup. Passing `null` simulates "no mode registered" — the
+     * responder should fall back to [DomainEventAccessMode.NONE].
+     */
+    private fun responderForAccessMode(mode: DomainEventAccessMode?): RSocketModelInspectionResponder {
+        val config = mockk<Configuration>()
+        every {
+            config.getOptionalComponent(DomainEventAccessMode::class.java)
+        } returns Optional.ofNullable(mode)
+        return RSocketModelInspectionResponder(
+                eventStorageEngine = mockk<EventStorageEngine>(),
+                registrar = mockk<RSocketHandlerRegistrar>(),
+                configuration = config,
+        )
+    }
 
     // ---------------------------------------------------------------------------------------
     //  Test fixtures

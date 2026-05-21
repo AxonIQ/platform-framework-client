@@ -18,6 +18,7 @@ package io.axoniq.platform.framework.client
 
 import io.axoniq.platform.framework.api.AxonServerEventStoreMessageSourceInformation
 import io.axoniq.platform.framework.api.CommandBusInformation
+import io.axoniq.platform.framework.api.DomainEventAccessMode
 import io.axoniq.platform.framework.api.CommonProcessorInformation
 import io.axoniq.platform.framework.api.EventProcessorInformation
 import io.axoniq.platform.framework.api.EventStoreInformation
@@ -61,6 +62,7 @@ import io.axoniq.framework.messaging.queryhandling.distributed.QueryBusConnector
 import org.axonframework.messaging.queryhandling.interception.InterceptingQueryBus
 import java.time.temporal.ChronoUnit
 import java.time.temporal.TemporalAmount
+import kotlin.jvm.optionals.getOrNull
 
 class SetupPayloadCreator(
         private val configuration: Configuration,
@@ -83,6 +85,7 @@ class SetupPayloadCreator(
                         clientStatusUpdates = true,
                         licenseEntitlement = hasEntitlementManager(),
                         modelInspection = hasStateManager(),
+                        domainEventsInsights = resolveDomainEventAccessMode(),
                 )
         )
     }
@@ -370,6 +373,16 @@ class SetupPayloadCreator(
             return false
         }
     }
+
+    /**
+     * Resolves the privacy gate the operator configured for the model-inspection (and AF4
+     * aggregate) routes. Falls back to [DomainEventAccessMode.NONE] when no mode was
+     * registered — matches the AF4 console-framework-client contract: payloads and state are
+     * redacted unless the operator explicitly opts in.
+     */
+    private fun resolveDomainEventAccessMode(): DomainEventAccessMode =
+            configuration.getOptionalComponent(DomainEventAccessMode::class.java).getOrNull()
+                    ?: DomainEventAccessMode.NONE
 }
 
 
