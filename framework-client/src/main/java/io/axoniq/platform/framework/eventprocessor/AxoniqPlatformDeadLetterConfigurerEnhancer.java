@@ -67,7 +67,14 @@ public class AxoniqPlatformDeadLetterConfigurerEnhancer implements Configuration
     private static void register(ComponentRegistry registry) {
         registry.registerComponent(ComponentDefinition
                                            .ofType(DeadLetterManager.class)
-                                           .withBuilder(DeadLetterManager::new)
+                                           .withBuilder(c -> {
+                                               AxoniqPlatformConfiguration platformConfig =
+                                                       c.getComponent(AxoniqPlatformConfiguration.class);
+                                               return new DeadLetterManager(
+                                                       c,
+                                                       platformConfig.getDlqMode(),
+                                                       platformConfig.getDlqDiagnosticsWhitelist());
+                                           })
                                            // Discover DLQs after event processors have started, by which point the
                                            // EventHandlingComponent decorator chain has materialised every DLQ.
                                            .onStart(Phase.INSTRUCTION_COMPONENTS, DeadLetterManager::start));

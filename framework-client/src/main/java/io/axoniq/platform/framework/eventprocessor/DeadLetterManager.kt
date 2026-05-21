@@ -19,15 +19,20 @@ package io.axoniq.platform.framework.eventprocessor
 import io.axoniq.framework.messaging.deadletter.DeadLetter
 import io.axoniq.framework.messaging.deadletter.SequencedDeadLetterProcessor
 import io.axoniq.framework.messaging.deadletter.SequencedDeadLetterQueue
+import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode
 import io.axoniq.platform.framework.api.DeadLetterResponse
 import io.axoniq.platform.framework.api.SequenceLettersResponse
+import org.apache.commons.codec.digest.DigestUtils
 import org.axonframework.common.configuration.Configuration
+import org.axonframework.messaging.eventhandling.EventHandlingComponent
 import org.axonframework.messaging.eventhandling.EventMessage
 import org.slf4j.LoggerFactory
 import java.util.concurrent.TimeUnit
 import io.axoniq.platform.framework.api.DeadLetter as ApiDeadLetter
 
 private const val LETTER_PAYLOAD_SIZE_LIMIT = 1024
+private const val MASKED = "<MASKED>"
+private const val LIMITED = "<LIMITED>"
 private val logger = LoggerFactory.getLogger(DeadLetterManager::class.java)
 
 /**
@@ -43,9 +48,16 @@ private val logger = LoggerFactory.getLogger(DeadLetterManager::class.java)
  *  - if a processor has a single DLQ the identifier equals the processor name (matches the issue requirement);
  *  - if a processor has multiple DLQs each is exposed as `<processorName>::<componentName>` so they remain
  *    addressable individually.
+ *
+ * Sequence identifiers exposed through the API come from the [EventHandlingComponent]'s configured sequencing
+ * policy (via [EventHandlingComponent.sequenceIdentifierFor]), matching AF4 semantics. This makes sequence ids
+ * stable across letter eviction — deleting the first letter no longer renames the sequence as it did under the
+ * earlier "first letter's message id" synthetic scheme.
  */
-class DeadLetterManager(
+class DeadLetterManager @JvmOverloads constructor(
         private val configuration: Configuration,
+        private val dlqMode: AxoniqConsoleDlqMode = AxoniqConsoleDlqMode.FULL,
+        private val dlqDiagnosticsWhitelist: List<String> = emptyList(),
 ) : ProcessingGroupInfoSource {
 
     @Volatile
@@ -67,6 +79,11 @@ class DeadLetterManager(
 
     /**
      * Internal view of a discovered DLQ together with all metadata required to address it through the public API.
+     *
+     * The [eventHandlingComponent] reference is captured during discovery so the sequence identifier of every
+     * letter can be derived from the same [EventHandlingComponent.sequenceIdentifierFor] the framework uses on
+     * enqueue. May be `null` if the component cannot be resolved from the configuration — in that case the
+     * manager falls back to the letter's own message id (documented in [sequenceIdentifierFor]).
      */
     private data class DlqEntry(
             val processingGroup: String,
@@ -74,6 +91,7 @@ class DeadLetterManager(
             val componentName: String,
             val dlq: SequencedDeadLetterQueue<EventMessage>,
             val processor: SequencedDeadLetterProcessor<EventMessage>,
+            val eventHandlingComponent: EventHandlingComponent?,
     )
 
     private val dlqNamePattern =
@@ -83,41 +101,31 @@ class DeadLetterManager(
             processingGroup: String,
             offset: Int = 0,
             size: Int = 25,
-            // Per-sequence cap intentionally small. The list query is meant to give the platform UI
-            // a *page* of sequences with enough preview letters to seed the detail modal — not to
-            // ship every letter every refresh. Mitchell observed 7-second refresh cycles on a local
-            // DLQ when this defaulted to 1000 (page-size 25 sequences x up to 1000 letters each =
-            // ~25k letter records serialised on every poll). 10 matches the historical "10+"
-            // placeholder behaviour the platform UI already displays for capped sequences and keeps
-            // the per-letter payload off the hot path. The detail modal pulls full pages lazily
-            // through `sequenceLetters(...)` (FetchDeadLettersForSequence) so long sequences are
-            // still browsable end-to-end without inflating the list query.
+            // Capped at 10 to keep poll payloads small; long sequences are browsed via sequenceLetters(...).
             maxSequenceLetters: Int = 10,
     ): DeadLetterResponse {
         val entry = dlqFor(processingGroup)
+        if (dlqMode == AxoniqConsoleDlqMode.NONE) {
+            return DeadLetterResponse(emptyList(), entry.dlq.amountOfSequences(null).join())
+        }
         val sequences = entry.dlq.deadLetters(null).join()
         val pageOfSequences = sequences
                 .drop(offset)
                 .take(size)
                 .map { sequence ->
                     val letters = sequence.toList()
-                    // The AF5 SequencedDeadLetterQueue does not expose the underlying sequence
-                    // identifier (the Object passed to enqueue()) on a DeadLetter, so we synthesise
-                    // a stable identifier from the first letter's message id and apply it to every
-                    // letter in the sequence. Operations look up sequences by walking deadLetters()
-                    // and matching this synthetic id — see findSequence(...).
-                    val syntheticSequenceId = letters.firstOrNull()?.message()?.identifier() ?: ""
+                    val sequenceId = letters.firstOrNull()?.let { sequenceIdentifierFor(entry, it) } ?: ""
                     letters
                             .take(maxSequenceLetters)
-                            .map { it.toApiLetter(syntheticSequenceId) }
+                            .map { it.toApiLetter(sequenceId) }
                 }
         val total = entry.dlq.amountOfSequences(null).join()
         return DeadLetterResponse(pageOfSequences, total)
     }
 
     fun sequenceSize(processingGroup: String, sequenceIdentifier: String): Long {
-        val dlq = dlqFor(processingGroup).dlq
-        return findSequence(dlq, sequenceIdentifier)?.count()?.toLong() ?: 0L
+        val entry = dlqFor(processingGroup)
+        return findSequence(entry, sequenceIdentifier)?.count()?.toLong() ?: 0L
     }
 
     /**
@@ -131,7 +139,11 @@ class DeadLetterManager(
             offset: Int,
             size: Int,
     ): SequenceLettersResponse {
-        val sequence = findSequence(dlqFor(processingGroup).dlq, sequenceIdentifier)
+        val entry = dlqFor(processingGroup)
+        if (dlqMode == AxoniqConsoleDlqMode.NONE) {
+            return SequenceLettersResponse(emptyList(), 0)
+        }
+        val sequence = findSequence(entry, sequenceIdentifier)
                 ?: return SequenceLettersResponse(emptyList(), 0)
         val total = sequence.size.toLong()
         val safeOffset = offset.coerceAtLeast(0)
@@ -146,15 +158,15 @@ class DeadLetterManager(
     /**
      * Evicts every letter belonging to the sequence identified by [sequenceIdentifier].
      *
-     * @return the number of letters that were actually evicted (0 when the synthetic id no longer
-     *         resolves — e.g. the operator's view was stale).
+     * @return the number of letters that were actually evicted (0 when the id no longer resolves — e.g. the
+     *         operator's view was stale).
      */
     fun delete(processingGroup: String, sequenceIdentifier: String): Int {
-        val dlq = dlqFor(processingGroup).dlq
-        val sequence = findSequence(dlq, sequenceIdentifier)
+        val entry = dlqFor(processingGroup)
+        val sequence = findSequence(entry, sequenceIdentifier)
         if (sequence == null) {
             logger.warn(
-                    "DLQ delete-sequence: no sequence in [{}] matches synthetic id [{}] — nothing to evict",
+                    "DLQ delete-sequence: no sequence in [{}] matches id [{}] — nothing to evict",
                     processingGroup, sequenceIdentifier,
             )
             return 0
@@ -165,7 +177,7 @@ class DeadLetterManager(
         )
         var evicted = 0
         sequence.forEach {
-            dlq.evict(it, null).join()
+            entry.dlq.evict(it, null).join()
             evicted++
         }
         return evicted
@@ -174,14 +186,14 @@ class DeadLetterManager(
     /**
      * Evicts a single letter identified by [messageIdentifier] from the sequence identified by
      * [sequenceIdentifier]. Returns `true` when an eviction was performed; `false` indicates the
-     * synthetic id or message id no longer resolves (typically because the caller's view was stale).
+     * sequence id or message id no longer resolves (typically because the caller's view was stale).
      */
     fun delete(processingGroup: String, sequenceIdentifier: String, messageIdentifier: String): Boolean {
-        val dlq = dlqFor(processingGroup).dlq
-        val sequence = findSequence(dlq, sequenceIdentifier)
+        val entry = dlqFor(processingGroup)
+        val sequence = findSequence(entry, sequenceIdentifier)
         if (sequence == null) {
             logger.warn(
-                    "DLQ delete-letter: no sequence in [{}] matches synthetic id [{}] (message id was [{}]) — caller view likely stale",
+                    "DLQ delete-letter: no sequence in [{}] matches id [{}] (message id was [{}]) — caller view likely stale",
                     processingGroup, sequenceIdentifier, messageIdentifier,
             )
             return false
@@ -198,22 +210,29 @@ class DeadLetterManager(
                 "DLQ delete-letter: evicting message [{}] from sequence [{}] in [{}]",
                 messageIdentifier, sequenceIdentifier, processingGroup,
         )
-        dlq.evict(target, null).join()
+        entry.dlq.evict(target, null).join()
         return true
     }
 
     /**
-     * Resolves a DLQ sequence by the synthetic identifier this manager exposes through the API
-     * (the message id of the sequence's first letter). Walks all sequences once and matches.
+     * Resolves a DLQ sequence by the identifier this manager exposes through the API. Walks every sequence
+     * in the queue, derives each sequence's identifier via [sequenceIdentifierFor], and matches.
+     *
+     * When [dlqMode] is [AxoniqConsoleDlqMode.MASKED] the API-side identifier is a SHA-256 hash, so the
+     * lookup compares the hash of each candidate id against the supplied [sequenceIdentifier] — this keeps
+     * the delete/process operations working even when the operator only sees masked ids.
      */
     private fun findSequence(
-            dlq: SequencedDeadLetterQueue<EventMessage>,
-            syntheticSequenceId: String,
+            entry: DlqEntry,
+            sequenceIdentifier: String,
     ): List<DeadLetter<out EventMessage>>? {
-        val sequences = dlq.deadLetters(null).join()
+        val sequences = entry.dlq.deadLetters(null).join()
         for (sequence in sequences) {
             val letters = sequence.toList()
-            if (letters.firstOrNull()?.message()?.identifier() == syntheticSequenceId) {
+            val firstLetter = letters.firstOrNull() ?: continue
+            val rawId = sequenceIdentifierFor(entry, firstLetter)
+            val candidateId = if (dlqMode == AxoniqConsoleDlqMode.MASKED) rawId.hashed() else rawId
+            if (candidateId == sequenceIdentifier) {
                 return letters
             }
         }
@@ -294,31 +313,87 @@ class DeadLetterManager(
                         IllegalStateException(
                                 "Component [$ehcName] is not wrapped with dead-letter processing")
                     } as SequencedDeadLetterProcessor<EventMessage>
+            // The EHC is needed for sequence-identifier resolution. Looking it up here (once per discovery
+            // run) keeps the hot path on deadLetters/lettersForSequence cheap and matches the "discover once"
+            // shape of the rest of this manager.
+            val ehc = it.module
+                    .getOptionalComponent(EventHandlingComponent::class.java, ehcName)
+                    .orElse(null)
             DlqEntry(
                     processingGroup = if (perProcessor[it.processor] == 1) it.processor else "${it.processor}::${it.component}",
                     processorName = it.processor,
                     componentName = it.component,
                     dlq = it.dlq,
                     processor = processor,
+                    eventHandlingComponent = ehc,
             )
         }
     }
 
     private fun discover(): List<DlqEntry> = entries ?: discoverEntries().also { entries = it }
 
+    /**
+     * Resolves the sequence identifier for a letter via [SequenceIdentifierResolver], which walks the
+     * [EventHandlingComponent] decorator chain to find a layer that can resolve the id without a live
+     * [org.axonframework.messaging.core.unitofwork.ProcessingContext]. Result shape mirrors the AF4
+     * implementation:
+     *  - String results are used verbatim;
+     *  - non-String results fall back to `hashCode().toString()`;
+     *  - if every decorator layer requires a context (or the EHC reference could not be captured at
+     *    discovery time, or a custom policy throws on null context) the letter's message identifier is
+     *    used so each letter still has a unique id.
+     */
+    private fun sequenceIdentifierFor(
+            entry: DlqEntry,
+            letter: DeadLetter<out EventMessage>,
+    ): String {
+        val ehc = entry.eventHandlingComponent ?: return letter.message().identifier()
+        val raw: Any? = SequenceIdentifierResolver.resolve(ehc, letter.message())
+        return when (raw) {
+            null -> letter.message().identifier()
+            is String -> raw
+            else -> raw.hashCode().toString()
+        }
+    }
+
     private fun DeadLetter<out EventMessage>.toApiLetter(sequenceIdentifier: String): ApiDeadLetter {
         val message = this.message()
-        return ApiDeadLetter(
-                messageIdentifier = message.identifier(),
-                message = serializePayload(message),
-                messageType = messageTypeOf(message),
-                causeType = this.cause().map { it.type() }.orElse(null),
-                causeMessage = this.cause().map { it.message() }.orElse(null),
-                enqueuedAt = this.enqueuedAt(),
-                lastTouched = this.lastTouched(),
-                diagnostics = this.diagnostics(),
-                sequenceIdentifier = sequenceIdentifier,
-        )
+        return when (dlqMode) {
+            AxoniqConsoleDlqMode.NONE,
+            AxoniqConsoleDlqMode.MASKED -> ApiDeadLetter(
+                    messageIdentifier = message.identifier(),
+                    message = MASKED,
+                    messageType = messageTypeOf(message),
+                    causeType = this.cause().map { it.type() }.orElse(null),
+                    causeMessage = this.cause().map { MASKED }.orElse(null),
+                    enqueuedAt = this.enqueuedAt(),
+                    lastTouched = this.lastTouched(),
+                    diagnostics = emptyMap<String, Any>(),
+                    sequenceIdentifier = sequenceIdentifier.hashed(),
+            )
+            AxoniqConsoleDlqMode.LIMITED -> ApiDeadLetter(
+                    messageIdentifier = message.identifier(),
+                    message = LIMITED,
+                    messageType = messageTypeOf(message),
+                    causeType = this.cause().map { it.type() }.orElse(null),
+                    causeMessage = this.cause().map { LIMITED }.orElse(null),
+                    enqueuedAt = this.enqueuedAt(),
+                    lastTouched = this.lastTouched(),
+                    diagnostics = this.diagnostics().filteredByWhitelist(),
+                    sequenceIdentifier = sequenceIdentifier,
+            )
+            AxoniqConsoleDlqMode.FULL -> ApiDeadLetter(
+                    messageIdentifier = message.identifier(),
+                    message = serializePayload(message),
+                    messageType = messageTypeOf(message),
+                    causeType = this.cause().map { it.type() }.orElse(null),
+                    causeMessage = this.cause().map { it.message() }.orElse(null),
+                    enqueuedAt = this.enqueuedAt(),
+                    lastTouched = this.lastTouched(),
+                    diagnostics = this.diagnostics(),
+                    sequenceIdentifier = sequenceIdentifier,
+            )
+        }
     }
 
     /**
@@ -349,6 +424,16 @@ class DeadLetterManager(
         return raw.toByteArray(Charsets.UTF_8)
                 .let { if (it.size <= LETTER_PAYLOAD_SIZE_LIMIT) raw else String(it, 0, LETTER_PAYLOAD_SIZE_LIMIT, Charsets.UTF_8) }
     }
+
+    /**
+     * Applies the whitelist filter used in LIMITED mode. Returns only entries whose key is in the
+     * configured whitelist; an empty whitelist removes all diagnostics.
+     */
+    private fun org.axonframework.messaging.core.Metadata.filteredByWhitelist(): Map<String, *> =
+            if (dlqDiagnosticsWhitelist.isEmpty()) emptyMap<String, Any>()
+            else subset(*dlqDiagnosticsWhitelist.toTypedArray())
+
+    private fun String.hashed(): String = DigestUtils.sha256Hex(this)
 
     /**
      * Lightweight DTO returned to [ProcessorReportCreator] so it can populate per-processor DLQ size information

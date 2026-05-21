@@ -16,9 +16,13 @@
 
 package io.axoniq.platform.framework;
 
+import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode;
 import org.axonframework.common.BuilderUtils;
 
 import java.lang.management.ManagementFactory;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -40,6 +44,9 @@ public class AxoniqPlatformConfiguration {
 
     private ScheduledExecutorService reportingTaskExecutor;
     private Integer reportingThreadPoolSize = 2;
+
+    private AxoniqConsoleDlqMode dlqMode = AxoniqConsoleDlqMode.FULL;
+    private List<String> dlqDiagnosticsWhitelist = new ArrayList<>();
 
     /**
      * Constructor to instantiate a {@link AxoniqPlatformConfiguration} based on the fields contained in the
@@ -185,5 +192,43 @@ public class AxoniqPlatformConfiguration {
 
     public Long getInitialDelay() {
         return initialDelay;
+    }
+
+    /**
+     * Controls how much DLQ data is exposed through the platform API. Defaults to
+     * {@link AxoniqConsoleDlqMode#FULL} to preserve the existing behaviour. Use {@code MASKED} when
+     * the platform may contain sensitive information, {@code LIMITED} to strip payload but keep
+     * sequence identifiers as-is for filtered diagnostics, or {@code NONE} to expose only the
+     * sequence count without any letter contents.
+     *
+     * @param dlqMode The dead-letter exposure mode.
+     * @return The builder for fluent interfacing.
+     */
+    public AxoniqPlatformConfiguration dlqMode(AxoniqConsoleDlqMode dlqMode) {
+        BuilderUtils.assertNonNull(dlqMode, "Axoniq Platform dlqMode may not be null");
+        this.dlqMode = dlqMode;
+        return this;
+    }
+
+    /**
+     * Adds a diagnostics metadata key to the whitelist that survives {@link AxoniqConsoleDlqMode#LIMITED}
+     * and {@link AxoniqConsoleDlqMode#MASKED} modes. All other keys are dropped before the letter
+     * leaves this client.
+     *
+     * @param key The diagnostics metadata key to permit.
+     * @return The builder for fluent interfacing.
+     */
+    public AxoniqPlatformConfiguration addDlqDiagnosticsWhitelistKey(String key) {
+        BuilderUtils.assertNonEmpty(key, "Axoniq Platform diagnostics whitelist key may not be null or empty");
+        this.dlqDiagnosticsWhitelist.add(key);
+        return this;
+    }
+
+    public AxoniqConsoleDlqMode getDlqMode() {
+        return dlqMode;
+    }
+
+    public List<String> getDlqDiagnosticsWhitelist() {
+        return Collections.unmodifiableList(dlqDiagnosticsWhitelist);
     }
 }
