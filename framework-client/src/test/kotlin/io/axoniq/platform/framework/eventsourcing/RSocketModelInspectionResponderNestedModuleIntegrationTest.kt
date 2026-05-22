@@ -16,6 +16,7 @@
 
 package io.axoniq.platform.framework.eventsourcing
 
+import io.axoniq.platform.framework.api.DomainEventAccessMode
 import io.axoniq.platform.framework.api.ModelEntityStateAtSequenceQuery
 import io.axoniq.platform.framework.client.RSocketHandlerRegistrar
 import io.axoniq.platform.framework.client.strategy.CborJackson3EncodingStrategy
@@ -68,6 +69,10 @@ class RSocketModelInspectionResponderNestedModuleIntegrationTest {
                 .componentRegistry { cr ->
                     cr.registerComponent(ComponentDefinition.ofType(RSocketHandlerRegistrar::class.java)
                             .withBuilder { RSocketHandlerRegistrar(CborJackson3EncodingStrategy()) })
+                    // State-reconstruction assertions below require FULL access; without an
+                    // explicitly registered mode the responder defaults to NONE and nulls state.
+                    cr.registerComponent(ComponentDefinition.ofType(DomainEventAccessMode::class.java)
+                            .withBuilder { DomainEventAccessMode.FULL })
                     // The custom BaseModule lives directly under the root component registry.
                     // Inside it, a further sub-module registers InnerEntity — two levels deep.
                     cr.registerModule(MySubModule())
