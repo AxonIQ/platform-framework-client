@@ -24,9 +24,15 @@ import io.axoniq.platform.framework.api.DeadLetterResponse
 import io.axoniq.platform.framework.api.SequenceLettersResponse
 import org.apache.commons.codec.digest.DigestUtils
 import org.axonframework.common.configuration.Configuration
+import org.axonframework.messaging.core.EmptyApplicationContext
+import org.axonframework.messaging.core.Metadata
+import org.axonframework.messaging.core.unitofwork.ProcessingContext
+import org.axonframework.messaging.core.unitofwork.SimpleUnitOfWorkFactory
+import org.axonframework.messaging.core.unitofwork.UnitOfWorkFactory
 import org.axonframework.messaging.eventhandling.EventHandlingComponent
 import org.axonframework.messaging.eventhandling.EventMessage
 import org.slf4j.LoggerFactory
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import io.axoniq.platform.framework.api.DeadLetter as ApiDeadLetter
 
@@ -56,7 +62,7 @@ private val logger = LoggerFactory.getLogger(DeadLetterManager::class.java)
  */
 class DeadLetterManager @JvmOverloads constructor(
         private val configuration: Configuration,
-        private val dlqMode: AxoniqConsoleDlqMode = AxoniqConsoleDlqMode.FULL,
+        private val dlqMode: AxoniqConsoleDlqMode = AxoniqConsoleDlqMode.NONE,
         private val dlqDiagnosticsWhitelist: List<String> = emptyList(),
 ) : ProcessingGroupInfoSource {
 
@@ -64,26 +70,40 @@ class DeadLetterManager @JvmOverloads constructor(
     private var entries: List<DlqEntry>? = null
 
     /**
+     * Factory used to materialise a real [org.axonframework.messaging.core.unitofwork.UnitOfWork] when the
+     * manager needs to call [EventHandlingComponent.sequenceIdentifierFor] on a dead letter — that call
+     * requires a non-null [ProcessingContext] because some decorator layers (notably
+     * `SequenceCachingEventHandlingComponent`) store per-event resources on the context.
+     *
+     * An [EmptyApplicationContext] is used because the stock sequencing-policy chain (constant,
+     * property, metadata, hierarchical, fallback) does not look up application components; the context
+     * is only consulted as a resource bag. If a custom policy ever needs richer context resolution the
+     * wiring can be revisited.
+     */
+    private val unitOfWorkFactory: UnitOfWorkFactory =
+            SimpleUnitOfWorkFactory(EmptyApplicationContext.INSTANCE)
+
+    /**
      * Discovers the DLQs configured on this application by walking each event-processor module.
      * Called once via the lifecycle; subsequent invocations refresh the cached view.
      *
-     * Also logs the active [dlqMode] at INFO so operators can confirm from application logs that the
-     * configured exposure level (`axoniq.platform.dlq-mode`) has actually taken effect. When the mode
-     * deviates from the default `FULL` we surface a warning so accidental misconfiguration (e.g. a
-     * forgotten `MASKED` override) is hard to miss in production logs.
+     * Logs the active [dlqMode] at INFO so operators can confirm from application logs that the
+     * configured exposure level (`axoniq.platform.dlq-mode`) has actually taken effect. We stay at
+     * INFO regardless of mode because some users alert on WARN-and-above and an expected
+     * configuration choice shouldn't trip those alerts.
      */
     fun start() {
         entries = discoverEntries()
         when (dlqMode) {
             AxoniqConsoleDlqMode.FULL -> logger.info(
-                    "AxoniqPlatform DLQ inspection initialised in FULL mode — payloads, causes and diagnostics are exposed verbatim.")
-            AxoniqConsoleDlqMode.LIMITED -> logger.warn(
-                    "AxoniqPlatform DLQ inspection initialised in LIMITED mode — payloads are hidden; diagnostics are filtered through whitelist {} (empty whitelist removes all diagnostic entries).",
+                    "Axoniq Platform DLQ inspection initialised in FULL mode — payloads, causes and diagnostics are exposed verbatim.")
+            AxoniqConsoleDlqMode.LIMITED -> logger.info(
+                    "Axoniq Platform DLQ inspection initialised in LIMITED mode — payloads are hidden; diagnostics are filtered through whitelist {} (empty whitelist removes all diagnostic entries).",
                     dlqDiagnosticsWhitelist)
-            AxoniqConsoleDlqMode.MASKED -> logger.warn(
-                    "AxoniqPlatform DLQ inspection initialised in MASKED mode — sequence ids are SHA-256 hashed; payloads, causes and diagnostics are not exposed. Operator delete/process actions still work via the hashed identifier.")
-            AxoniqConsoleDlqMode.NONE -> logger.warn(
-                    "AxoniqPlatform DLQ inspection initialised in NONE mode — only sequence counts are exposed. List queries return empty results regardless of letter contents.")
+            AxoniqConsoleDlqMode.MASKED -> logger.info(
+                    "Axoniq Platform DLQ inspection initialised in MASKED mode — sequence ids are SHA-256 hashed; payloads, causes and diagnostics are not exposed. Operator delete/process actions still work via the hashed identifier.")
+            AxoniqConsoleDlqMode.NONE -> logger.info(
+                    "Axoniq Platform DLQ inspection initialised in NONE mode — only sequence counts are exposed. List queries return empty results regardless of letter contents.")
         }
     }
 
@@ -130,10 +150,6 @@ class DeadLetterManager @JvmOverloads constructor(
                 .take(size)
                 .map { sequence ->
                     val letters = sequence.toList()
-                    // Compute the API-side sequence id ONCE here: raw policy result, hashed in MASKED.
-                    // toApiLetter then just passes this through verbatim, avoiding the double-hash
-                    // that would otherwise hit letters in the lettersForSequence response (where the
-                    // incoming sequenceIdentifier is already hashed).
                     val rawSequenceId = letters.firstOrNull()?.let { sequenceIdentifierFor(entry, it) } ?: ""
                     val apiSequenceId = if (dlqMode == AxoniqConsoleDlqMode.MASKED) rawSequenceId.hashed() else rawSequenceId
                     letters
@@ -368,24 +384,38 @@ class DeadLetterManager @JvmOverloads constructor(
     private fun discover(): List<DlqEntry> = entries ?: discoverEntries().also { entries = it }
 
     /**
-     * Resolves the sequence identifier for a letter via [SequenceIdentifierResolver], which walks the
-     * [EventHandlingComponent] decorator chain to find a layer that can resolve the id without a live
-     * [org.axonframework.messaging.core.unitofwork.ProcessingContext]. Result shape mirrors the AF4
-     * implementation:
+     * Resolves the sequence identifier for a letter by spinning up a real
+     * [org.axonframework.messaging.core.unitofwork.UnitOfWork] and calling
+     * [EventHandlingComponent.sequenceIdentifierFor] with its [ProcessingContext]. The UoW gives the
+     * decorator chain (including `SequenceCachingEventHandlingComponent`) a non-null context to read
+     * resources from, matching the framework's own invariants and avoiding the NPE that calling with
+     * `null` would trigger. The UoW does no real work — the lambda completes synchronously on the
+     * direct executor, so there's no scheduling cost. Result shape mirrors the AF4 implementation:
      *  - String results are used verbatim;
      *  - non-String results fall back to `hashCode().toString()`;
-     *  - if every decorator layer requires a context (or the EHC reference could not be captured at
-     *    discovery time, or a custom policy throws on null context) the letter's message identifier is
-     *    used so each letter still has a unique id.
+     *  - if the EHC reference could not be captured at discovery time, or sequence resolution throws
+     *    or returns `null`, the letter's message identifier is used so each letter still has a
+     *    unique id.
      */
     private fun sequenceIdentifierFor(
             entry: DlqEntry,
             letter: DeadLetter<out EventMessage>,
     ): String {
-        val ehc = entry.eventHandlingComponent ?: return letter.message().identifier()
-        val raw: Any? = SequenceIdentifierResolver.resolve(ehc, letter.message())
+        val message = letter.message()
+        val ehc = entry.eventHandlingComponent ?: return message.identifier()
+        val raw: Any? = try {
+            unitOfWorkFactory.create().executeWithResult { context: ProcessingContext ->
+                CompletableFuture.completedFuture<Any?>(ehc.sequenceIdentifierFor(message, context))
+            }.join()
+        } catch (ex: Exception) {
+            logger.debug(
+                    "Sequence identifier resolution threw for message [{}] in [{}] — falling back to message id.",
+                    message.identifier(), entry.processingGroup, ex,
+            )
+            null
+        }
         return when (raw) {
-            null -> letter.message().identifier()
+            null -> message.identifier()
             is String -> raw
             else -> raw.hashCode().toString()
         }
@@ -396,7 +426,8 @@ class DeadLetterManager @JvmOverloads constructor(
         // `sequenceIdentifier` is expected to be in its final API form (hashed in MASKED, raw in FULL/
         // LIMITED). Hashing is the caller's responsibility — see `deadLetters(...)`.
         return when (dlqMode) {
-            AxoniqConsoleDlqMode.NONE,
+            AxoniqConsoleDlqMode.NONE -> error(
+                    "DLQ in NONE mode must not serialise letters — short-circuit in deadLetters/lettersForSequence was bypassed.")
             AxoniqConsoleDlqMode.MASKED -> ApiDeadLetter(
                     messageIdentifier = message.identifier(),
                     message = MASKED,
@@ -434,17 +465,12 @@ class DeadLetterManager @JvmOverloads constructor(
     }
 
     /**
-     * Best-effort human-readable type name for the payload. When the DLQ has the message in its
-     * still-serialised form the JVM type is `byte[]`, which is useless to display, so we fall back
-     * to the qualified name carried on the message's [org.axonframework.messaging.core.MessageType].
+     * Best-effort human-readable type name for the message. In AF5 the qualified name carried on the
+     * message's [org.axonframework.messaging.core.MessageType] is the primary type identifier and is
+     * always set; the payload class is only a fallback for the unlikely case the type lookup throws.
      */
-    private fun messageTypeOf(message: EventMessage): String {
-        val payloadClass = message.payloadType()
-        if (payloadClass == ByteArray::class.java) {
-            return runCatching { message.type().name() }.getOrDefault("byte[]")
-        }
-        return payloadClass.simpleName ?: payloadClass.name
-    }
+    private fun messageTypeOf(message: EventMessage): String =
+            runCatching { message.type().name() }.getOrDefault(message.payloadType().name)
 
     private fun serializePayload(message: EventMessage): String {
         val raw: String = try {
@@ -466,7 +492,7 @@ class DeadLetterManager @JvmOverloads constructor(
      * Applies the whitelist filter used in LIMITED mode. Returns only entries whose key is in the
      * configured whitelist; an empty whitelist removes all diagnostics.
      */
-    private fun org.axonframework.messaging.core.Metadata.filteredByWhitelist(): Map<String, *> =
+    private fun Metadata.filteredByWhitelist(): Map<String, *> =
             if (dlqDiagnosticsWhitelist.isEmpty()) emptyMap<String, Any>()
             else subset(*dlqDiagnosticsWhitelist.toTypedArray())
 

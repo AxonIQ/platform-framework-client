@@ -19,6 +19,7 @@ package io.axoniq.platform.framework.eventprocessor
 import io.axoniq.framework.messaging.deadletter.GenericDeadLetter
 import io.axoniq.framework.messaging.deadletter.SequencedDeadLetterQueue
 import io.axoniq.framework.messaging.eventhandling.deadletter.DeadLetterQueueConfiguration
+import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode
 import org.axonframework.common.configuration.AxonConfiguration
 import org.axonframework.common.configuration.ComponentDefinition
 import org.axonframework.eventsourcing.configuration.EventSourcingConfigurer
@@ -89,7 +90,9 @@ class RSocketDlqResponderIntegrationTest {
         configuration = EventSourcingConfigurer.create()
                 .componentRegistry { registry ->
                     registry.registerComponent(ComponentDefinition.ofType(DeadLetterManager::class.java)
-                            .withBuilder { c -> DeadLetterManager(c) })
+                            // FULL exposure so the assertions on payload + sequence id can run. The
+                            // production default is now NONE (see AxoniqPlatformConfiguration#dlqMode).
+                            .withBuilder { c -> DeadLetterManager(c, AxoniqConsoleDlqMode.FULL) })
                 }
                 .messaging { messaging ->
                     messaging.eventProcessing { eventProcessing ->
@@ -138,12 +141,13 @@ class RSocketDlqResponderIntegrationTest {
     }
 
     @Test
-    fun `the framework wraps the EHC in a caching decorator and the resolver unwraps past it`() {
+    fun `the framework wraps the EHC in a caching decorator and the manager resolves through it`() {
         // Sanity check that exercises the live decorator chain: AF5 wraps every EHC with
-        // SequenceCachingEventHandlingComponent whose sequenceIdentifierFor NPEs without a live
-        // ProcessingContext. The resolver must unwrap past it and reach a layer whose policy can
-        // run with `null` context. If this regresses, the four flow tests below also fail — this
-        // test fails first with a clearer signal.
+        // SequenceCachingEventHandlingComponent whose sequenceIdentifierFor reads a per-event
+        // resource off a ProcessingContext. The manager spins up a real UnitOfWork on every
+        // sequence-id resolution so the caching decorator gets the non-null context it requires.
+        // If this regresses, the four flow tests below also fail — this test fails first with a
+        // clearer signal because it bypasses pagination.
         val expectedEhcName = "EventHandlingComponent[$PROCESSOR_NAME][$COMPONENT_NAME]"
         val ehc = configuration.moduleConfigurations.asSequence()
                 .mapNotNull { module ->
@@ -154,8 +158,10 @@ class RSocketDlqResponderIntegrationTest {
                 }
                 .firstOrNull()
         assertNotNull(ehc, "Expected an EventHandlingComponent registered as [$expectedEhcName]")
-        val event: EventMessage = GenericEventMessage(MessageType(EVENT_NAME), TestEvent("sanity"))
-        assertEquals(SEQUENCE_ID, SequenceIdentifierResolver.resolve(ehc!!, event))
+        // Drive the resolution through the public API rather than poking at the manager's
+        // internals — that's the contract the rest of the production code relies on.
+        val firstLetterSequenceId = manager.deadLetters(PROCESSOR_NAME).sequences[0][0].sequenceIdentifier
+        assertEquals(SEQUENCE_ID, firstLetterSequenceId)
     }
 
     @Test

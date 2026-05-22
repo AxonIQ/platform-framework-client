@@ -45,7 +45,7 @@ public class AxoniqPlatformConfiguration {
     private ScheduledExecutorService reportingTaskExecutor;
     private Integer reportingThreadPoolSize = 2;
 
-    private AxoniqConsoleDlqMode dlqMode = AxoniqConsoleDlqMode.FULL;
+    private AxoniqConsoleDlqMode dlqMode = AxoniqConsoleDlqMode.NONE;
     private List<String> dlqDiagnosticsWhitelist = new ArrayList<>();
 
     /**
@@ -196,10 +196,12 @@ public class AxoniqPlatformConfiguration {
 
     /**
      * Controls how much DLQ data is exposed through the platform API. Defaults to
-     * {@link AxoniqConsoleDlqMode#FULL} to preserve the existing behaviour. Use {@code MASKED} when
-     * the platform may contain sensitive information, {@code LIMITED} to strip payload but keep
-     * sequence identifiers as-is for filtered diagnostics, or {@code NONE} to expose only the
-     * sequence count without any letter contents.
+     * {@link AxoniqConsoleDlqMode#NONE} so applications must deliberately opt into exposing letter
+     * contents (which may include personal data and would make the platform a data processor under
+     * GDPR). Use {@code MASKED} when sequence identifiers must still be addressable but contents
+     * must not leak, {@code LIMITED} to strip payload but keep sequence identifiers as-is for
+     * filtered diagnostics, or {@code FULL} for unrestricted access (typically only safe in
+     * development).
      *
      * @param dlqMode The dead-letter exposure mode.
      * @return The builder for fluent interfacing.

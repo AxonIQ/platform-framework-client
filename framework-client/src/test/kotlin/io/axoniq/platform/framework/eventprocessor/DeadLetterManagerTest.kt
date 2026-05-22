@@ -427,7 +427,9 @@ class DeadLetterManagerTest {
         }
 
         @Test
-        fun `messageType falls back to message type name when payload class is ByteArray`() {
+        fun `messageType uses the qualified name carried on the message type (primary in AF5)`() {
+            // In AF5 `message.type().name()` is the primary identifier regardless of whether the
+            // payload class is the still-serialised `ByteArray` or the deserialised user type.
             val message = fakeEventMessage(
                     id = "m1",
                     payload = "still serialised".toByteArray(),
@@ -445,15 +447,21 @@ class DeadLetterManagerTest {
         }
 
         @Test
-        fun `messageType uses payload class simple name for non-ByteArray payloads`() {
-            val sequence = listOf(fakeLetter("m1", payload = "hello", payloadType = String::class.java))
+        fun `messageType falls back to payload class fqn when the message type lookup throws`() {
+            // Defensive fallback only — in well-formed AF5 messages this branch should never trip.
+            val message = mockk<EventMessage>(relaxed = true)
+            every { message.identifier() } returns "m1"
+            every { message.payload() } returns "hello"
+            every { message.payloadType() } returns String::class.java
+            every { message.type() } throws IllegalStateException("no type")
+            val letter = fakeLetterFromMessage(message)
             val manager = managerWith(
-                    "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to fakeDlq(sequences = listOf(sequence)),
+                    "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to fakeDlq(sequences = listOf(listOf(letter))),
             )
 
             val apiLetter = manager.deadLetters("orders").sequences[0][0]
 
-            assertEquals("String", apiLetter.messageType)
+            assertEquals("java.lang.String", apiLetter.messageType)
         }
     }
 
@@ -632,6 +640,26 @@ class DeadLetterManagerTest {
                 manager.sequenceSize("unknown-group", "whatever")
             }
         }
+
+        @Test
+        fun `NONE mode never reaches toApiLetter — bypassing the short-circuit throws IllegalStateException`() {
+            // Defence in depth: deadLetters/lettersForSequence short-circuit before serialising
+            // letters in NONE mode. If a future refactor accidentally drops that guard, we want
+            // toApiLetter to fail loudly rather than silently leak <MASKED> placeholders.
+            val manager = managerWith(
+                    "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to fakeDlq(),
+                    dlqMode = AxoniqConsoleDlqMode.NONE,
+            )
+            val toApiLetter = DeadLetterManager::class.java.declaredMethods
+                    .single { it.name == "toApiLetter" }
+                    .apply { isAccessible = true }
+            val letter = fakeLetter("m1")
+
+            val thrown = assertThrows(java.lang.reflect.InvocationTargetException::class.java) {
+                toApiLetter.invoke(manager, letter, "any-id")
+            }
+            assertTrue(thrown.cause is IllegalStateException)
+        }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -685,10 +713,6 @@ class DeadLetterManagerTest {
         // us answer with whatever object reference; the unchecked cast keeps the compiler happy.
         @Suppress("UNCHECKED_CAST")
         every { ehc.sequenceIdentifierFor(any(), any()) } answers {
-            policy(firstArg<EventMessage>()) as Any
-        }
-        @Suppress("UNCHECKED_CAST")
-        every { ehc.sequenceIdentifierFor(any(), isNull()) } answers {
             policy(firstArg<EventMessage>()) as Any
         }
         return ehc

@@ -84,7 +84,7 @@ class SetupPayloadCreator(
                         threadDump = true,
                         clientStatusUpdates = true,
                         licenseEntitlement = hasEntitlementManager(),
-                        deadLetterQueuesInsights = axoniqPlatformConfiguration()?.dlqMode ?: AxoniqConsoleDlqMode.FULL,
+                        deadLetterQueuesInsights = axoniqPlatformConfiguration()?.dlqMode ?: AxoniqConsoleDlqMode.NONE,
                 )
         )
     }
@@ -352,9 +352,9 @@ class SetupPayloadCreator(
     /**
      * Resolves the [AxoniqPlatformConfiguration] from the application configuration, returning `null`
      * when the platform module hasn't been wired (legacy or non-Spring setups). The caller falls back
-     * to a sensible default (`FULL`) so existing applications keep their current visibility — only
-     * applications that explicitly opt into a restrictive mode (`LIMITED`/`MASKED`/`NONE`) will see
-     * the corresponding gates applied in the platform UI.
+     * to `NONE` so applications that haven't deliberately opted in stay closed by default — exposing
+     * letter contents (which can include personal data) requires an explicit `dlqMode` override
+     * (`LIMITED`/`MASKED`/`FULL`) on the application's [AxoniqPlatformConfiguration].
      */
     private fun axoniqPlatformConfiguration(): AxoniqPlatformConfiguration? =
             configuration.getOptionalComponent(AxoniqPlatformConfiguration::class.java).orElse(null)
