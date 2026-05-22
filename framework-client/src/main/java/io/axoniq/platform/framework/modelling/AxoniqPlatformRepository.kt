@@ -47,19 +47,15 @@ class AxoniqPlatformRepository<ID : Any, E : Any>(
     override fun load(identifier: ID, processingContext: ProcessingContext): CompletableFuture<ManagedEntity<ID, E>> {
         val entityId = entityIdentifierFor(identifier, processingContext)
         processingContext.putResource(CurrentEntityContext.RESOURCE_KEY, entityId)
-        CurrentEntityContext.setOnThread(entityId)
         val startTime = System.nanoTime()
-        return try {
-            delegate.load(identifier, processingContext)
-        } finally {
-            CurrentEntityContext.clearOnThread()
-        }.whenComplete { _, error ->
-            val duration = System.nanoTime() - startTime
-            entityMetricsRegistry.registerLoad(entityId, duration, success = error == null)
-            HandlerMeasurement.onContext(processingContext) {
-                it.registerMetricValue(LoadModelMetric(identifier = "load:${entityType().simpleName}"), duration)
-            }
-        }
+        return delegate.load(identifier, processingContext)
+                .whenComplete { _, error ->
+                    val duration = System.nanoTime() - startTime
+                    entityMetricsRegistry.registerLoad(entityId, duration, success = error == null)
+                    HandlerMeasurement.onContext(processingContext) {
+                        it.registerMetricValue(LoadModelMetric(identifier = "load:${entityType().simpleName}"), duration)
+                    }
+                }
     }
 
     override fun loadOrCreate(identifier: ID, processingContext: ProcessingContext): CompletableFuture<ManagedEntity<ID, E>> {
@@ -71,15 +67,9 @@ class AxoniqPlatformRepository<ID : Any, E : Any>(
         // event-sourced entity would be reported as a creation too.
         val sourcedCounter = AtomicLong(0)
         processingContext.putResource(CurrentEntityContext.RESOURCE_KEY, entityId)
-        CurrentEntityContext.setOnThread(entityId)
-        CurrentEntityContext.setSourcedEventsCounterOnThread(sourcedCounter)
+        processingContext.putResource(CurrentEntityContext.COUNTER_KEY, AtomicLong(0))
         val startTime = System.nanoTime()
-        return try {
-            delegate.loadOrCreate(identifier, processingContext)
-        } finally {
-            CurrentEntityContext.clearOnThread()
-            CurrentEntityContext.clearSourcedEventsCounterOnThread()
-        }.whenComplete { _, error ->
+        return delegate.loadOrCreate(identifier, processingContext).whenComplete { _, error ->
             val duration = System.nanoTime() - startTime
             entityMetricsRegistry.registerLoad(entityId, duration, success = error == null)
             if (error == null && sourcedCounter.get() == 0L) {

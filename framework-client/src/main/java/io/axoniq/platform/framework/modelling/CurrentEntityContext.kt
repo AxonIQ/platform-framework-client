@@ -38,27 +38,5 @@ import java.util.concurrent.atomic.AtomicLong
 object CurrentEntityContext {
     val RESOURCE_KEY: Context.ResourceKey<EntityStatisticIdentifier> =
             Context.ResourceKey.withLabel<EntityStatisticIdentifier>("Axoniq Platform - Current Entity")
-
-    private val threadLocal: ThreadLocal<EntityStatisticIdentifier> = ThreadLocal()
-    private val sourcedEventsTL: ThreadLocal<AtomicLong> = ThreadLocal()
-
-    fun setOnThread(identifier: EntityStatisticIdentifier) {
-        threadLocal.set(identifier)
-    }
-
-    fun getFromThread(): EntityStatisticIdentifier? = threadLocal.get()
-
-    fun clearOnThread() {
-        threadLocal.remove()
-    }
-
-    fun setSourcedEventsCounterOnThread(counter: AtomicLong) {
-        sourcedEventsTL.set(counter)
-    }
-
-    fun getSourcedEventsCounterFromThread(): AtomicLong? = sourcedEventsTL.get()
-
-    fun clearSourcedEventsCounterOnThread() {
-        sourcedEventsTL.remove()
-    }
+    val COUNTER_KEY: Context.ResourceKey<AtomicLong> = Context.ResourceKey.withLabel<AtomicLong>("Axoniq Platform - Entity source counter")
 }
