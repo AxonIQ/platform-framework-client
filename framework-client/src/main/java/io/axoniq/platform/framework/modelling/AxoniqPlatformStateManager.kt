@@ -23,14 +23,15 @@ import org.axonframework.modelling.repository.Repository
 import java.util.concurrent.CompletableFuture
 
 class AxoniqPlatformStateManager(
-        private val delegate: StateManager
+        private val delegate: StateManager,
+        private val entityMetricsRegistry: EntityMetricsRegistry,
 ): StateManager {
     override fun <ID: Any, T: Any> register(repository: Repository<ID, T>): StateManager {
         if(repository is AxoniqPlatformRepository<ID, T>) {
             delegate.register<ID, T>(repository)
             return this
         }
-        delegate.register<ID, T>(AxoniqPlatformRepository(repository))
+        delegate.register<ID, T>(AxoniqPlatformRepository(repository, entityMetricsRegistry))
         return this
     }
 

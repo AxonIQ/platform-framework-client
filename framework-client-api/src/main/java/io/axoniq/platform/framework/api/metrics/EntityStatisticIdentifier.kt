@@ -18,13 +18,13 @@ package io.axoniq.platform.framework.api.metrics
 
 import com.fasterxml.jackson.annotation.JsonProperty
 
-data class StatisticReport(
-    @JsonProperty("h")
-    val handlers: List<HandlerStatisticsWithIdentifier>,
-    @JsonProperty("d")
-    val dispatchers: List<DispatcherStatisticsWithIdentifier>,
-    @JsonProperty("a")
-    val aggregates: List<AggregateStatisticsWithIdentifier>,
-    @JsonProperty("e")
-    val entities: List<EntityStatisticsWithIdentifier> = emptyList(),
+data class EntityStatisticIdentifier(
+    @JsonProperty("n")
+    val entityName: String,
+    @JsonProperty("i")
+    val entityId: String,
+    @JsonProperty("mt")
+    val messageType: String,
+    @JsonProperty("mn")
+    val messageName: String,
 )
