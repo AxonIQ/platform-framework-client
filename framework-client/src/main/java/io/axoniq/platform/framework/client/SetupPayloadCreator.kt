@@ -84,7 +84,7 @@ class SetupPayloadCreator(
                         threadDump = true,
                         clientStatusUpdates = true,
                         licenseEntitlement = hasEntitlementManager(),
-                        deadLetterQueuesInsights = axoniqPlatformConfiguration()?.dlqMode ?: AxoniqConsoleDlqMode.NONE,
+                        deadLetterQueuesInsights = resolveDeadLetterQueuesInsights(),
                 )
         )
     }
@@ -358,6 +358,28 @@ class SetupPayloadCreator(
      */
     private fun axoniqPlatformConfiguration(): AxoniqPlatformConfiguration? =
             configuration.getOptionalComponent(AxoniqPlatformConfiguration::class.java).orElse(null)
+
+    /**
+     * Returns the DLQ insight level reported on the setup payload, or `null` when this application
+     * has no DLQ library on its classpath (in which case DLQ inspection isn't a feature of this
+     * client at all — semantically distinct from [AxoniqConsoleDlqMode.NONE], which means the feature
+     * exists but the operator hid all letter data).
+     */
+    private fun resolveDeadLetterQueuesInsights(): AxoniqConsoleDlqMode? {
+        if (!isDeadLetterLibraryAvailable()) return null
+        return axoniqPlatformConfiguration()?.dlqMode ?: AxoniqConsoleDlqMode.NONE
+    }
+
+    private fun isDeadLetterLibraryAvailable(): Boolean = try {
+        Class.forName(
+                "io.axoniq.framework.messaging.deadletter.SequencedDeadLetterQueue",
+                false,
+                SetupPayloadCreator::class.java.classLoader,
+        )
+        true
+    } catch (_: ClassNotFoundException) {
+        false
+    }
 
     /**
      * Checks whether the PlatformLicenseSource have been configured, in which case we want updates of licenses from Platform.
