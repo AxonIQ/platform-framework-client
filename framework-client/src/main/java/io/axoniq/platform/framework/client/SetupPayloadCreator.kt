@@ -16,6 +16,7 @@
 
 package io.axoniq.platform.framework.client
 
+import io.axoniq.platform.framework.AxoniqPlatformConfiguration
 import io.axoniq.platform.framework.api.AxonServerEventStoreMessageSourceInformation
 import io.axoniq.platform.framework.api.CommandBusInformation
 import io.axoniq.platform.framework.api.DomainEventAccessMode
@@ -376,12 +377,15 @@ class SetupPayloadCreator(
 
     /**
      * Resolves the privacy gate the operator configured for the model-inspection (and AF4
-     * aggregate) routes. Falls back to [DomainEventAccessMode.NONE] when no mode was
-     * registered — matches the AF4 console-framework-client contract: payloads and state are
-     * redacted unless the operator explicitly opts in.
+     * aggregate) routes. Reads it directly off [AxoniqPlatformConfiguration] rather than as a
+     * standalone Configuration component — it is a single property, not a service worth its
+     * own registration. Falls back to [DomainEventAccessMode.NONE] when the configuration
+     * itself is absent, matching the AF4 console-framework-client contract: payloads and
+     * state are redacted unless the operator explicitly opts in.
      */
     private fun resolveDomainEventAccessMode(): DomainEventAccessMode =
-            configuration.getOptionalComponent(DomainEventAccessMode::class.java).getOrNull()
+            configuration.getOptionalComponent(AxoniqPlatformConfiguration::class.java).getOrNull()
+                    ?.domainEventAccessMode
                     ?: DomainEventAccessMode.NONE
 }
 
