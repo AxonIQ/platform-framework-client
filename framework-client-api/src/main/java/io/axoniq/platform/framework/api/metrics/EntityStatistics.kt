@@ -21,8 +21,6 @@ import com.fasterxml.jackson.annotation.JsonProperty
 data class EntityStatistics(
     @JsonProperty("c")
     val count: Double,
-    @JsonProperty("cr")
-    val creations: Double,
     @JsonProperty("f")
     val failed: Double,
     @JsonProperty("t")

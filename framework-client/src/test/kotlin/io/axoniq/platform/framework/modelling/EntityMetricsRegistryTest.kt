@@ -25,39 +25,27 @@ import java.util.concurrent.TimeUnit
 
 class EntityMetricsRegistryTest {
 
-    private val orderCreated = EntityStatisticIdentifier(
-            entityName = "Order",
-            entityId = "order-1",
-            messageType = "CommandMessage",
-            messageName = "CreateOrder",
-    )
-
-    private val orderShipped = EntityStatisticIdentifier(
-            entityName = "Order",
-            entityId = "order-1",
-            messageType = "CommandMessage",
-            messageName = "ShipOrder",
-    )
+    private val order = EntityStatisticIdentifier(entityName = "Order")
+    private val reservation = EntityStatisticIdentifier(entityName = "Reservation")
 
     @Test
-    fun `separate keys produce separate report entries`() {
+    fun `separate entity names produce separate report entries`() {
         val registry = EntityMetricsRegistry()
 
-        registry.registerLoad(orderCreated, 10_000_000, success = true)
-        registry.registerLoad(orderShipped, 20_000_000, success = true)
-        registry.registerCreation(orderCreated)
+        registry.registerLoad(order, 10_000_000, success = true)
+        registry.registerLoad(reservation, 20_000_000, success = true)
 
         val stats = registry.getStats().associateBy { it.entity }
         assertEquals(2, stats.size)
-        assertNotNull(stats[orderCreated])
-        assertNotNull(stats[orderShipped])
+        assertNotNull(stats[order])
+        assertNotNull(stats[reservation])
     }
 
     @Test
     fun `load records a total timer with non-empty snapshot`() {
         val registry = EntityMetricsRegistry()
 
-        registry.registerLoad(orderCreated, 5_000_000, success = true)
+        registry.registerLoad(order, 5_000_000, success = true)
 
         val stats = registry.getStats().single()
         assertNotNull(stats.statistics.timer)
@@ -69,9 +57,9 @@ class EntityMetricsRegistryTest {
     fun `additional timer is exposed under the requested metric name`() {
         val registry = EntityMetricsRegistry()
 
-        registry.registerLoad(orderCreated, 5_000_000, success = true)
+        registry.registerLoad(order, 5_000_000, success = true)
         registry.registerAdditionalTimer(
-                orderCreated,
+                order,
                 EntityMetricsRegistry.METRIC_CRITERIA_SIZE,
                 42L,
                 TimeUnit.NANOSECONDS,
@@ -79,16 +67,5 @@ class EntityMetricsRegistryTest {
 
         val stats = registry.getStats().single()
         assertTrue(stats.statistics.metrics.containsKey(EntityMetricsRegistry.METRIC_CRITERIA_SIZE))
-    }
-
-    @Test
-    fun `creation without load still produces a report entry`() {
-        val registry = EntityMetricsRegistry()
-
-        registry.registerCreation(orderCreated)
-
-        val stats = registry.getStats()
-        assertEquals(1, stats.size)
-        assertEquals(orderCreated, stats.single().entity)
     }
 }

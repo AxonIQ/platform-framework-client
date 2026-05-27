@@ -78,17 +78,11 @@ class AxoniqPlatformEventStore(private val delegate: EventStore, private val ent
             private val processingContext: ProcessingContext): EventStoreTransaction {
         override fun source(condition: SourcingCondition, resumePositionCallback: Consumer<Position>?): MessageStream<out EventMessage> {
             val entity = processingContext.getResource(CurrentEntityContext.RESOURCE_KEY)
-            val counter = processingContext.getResource(CurrentEntityContext.COUNTER_KEY)
-            if(entity == null || counter == null) {
+            if (entity == null) {
                 return delegate.source(condition, resumePositionCallback)
             }
-            recordCriteriaSize(entity, condition)
-            return wrapForStreamSize(entity, delegate.source(condition, resumePositionCallback), counter)
-        }
-
-
-        private fun recordCriteriaSize(entity: EntityStatisticIdentifier, condition: SourcingCondition) {
             recordCriteriaSize(entity, condition.criteria().flatten().size)
+            return wrapForStreamSize(entity, delegate.source(condition, resumePositionCallback))
         }
 
         private fun recordCriteriaSize(entity: EntityStatisticIdentifier, criteriaSize: Int) {
@@ -110,21 +104,14 @@ class AxoniqPlatformEventStore(private val delegate: EventStore, private val ent
         private fun wrapForStreamSize(
                 entity: EntityStatisticIdentifier,
                 stream: MessageStream<out EventMessage>,
-                sharedSourcedCounter: AtomicLong?,
         ): MessageStream<out EventMessage> {
             val counter = AtomicLong(0)
             return stream
-                    .onNext {
-                        counter.incrementAndGet()
-                        // Also bump the loadOrCreate-shared counter so the repository can tell load
-                        // (count > 0) from creation (count == 0). May be null for direct event-store
-                        // streaming outside a managed load.
-                        sharedSourcedCounter?.incrementAndGet()
-                    }
+                    .onNext { counter.incrementAndGet() }
                     .onComplete {
                         // Count-style metric; see note in recordCriteriaSize for unit choice.
-                        // Skip recording for fresh-entity creations (no events sourced) — that case
-                        // belongs to the Creations counter, not the stream-size distribution.
+                        // Skip recording when no events were sourced — a fresh entity has nothing
+                        // meaningful to contribute to the stream-size distribution.
                         val size = counter.get()
                         if (size > 0L) {
                             entityMetricsRegistry.registerAdditionalTimer(

@@ -19,13 +19,11 @@ package io.axoniq.platform.framework.modelling
 import io.axoniq.platform.framework.api.metrics.EntityStatisticIdentifier
 import io.axoniq.platform.framework.api.metrics.LoadModelMetric
 import io.axoniq.platform.framework.messaging.HandlerMeasurement
-import io.axoniq.platform.framework.messaging.toInformation
 import org.axonframework.common.infra.ComponentDescriptor
 import org.axonframework.messaging.core.unitofwork.ProcessingContext
 import org.axonframework.modelling.repository.ManagedEntity
 import org.axonframework.modelling.repository.Repository
 import java.util.concurrent.CompletableFuture
-import java.util.concurrent.atomic.AtomicLong
 
 class AxoniqPlatformRepository<ID : Any, E : Any>(
         private val delegate: Repository<ID, E>,
@@ -45,7 +43,7 @@ class AxoniqPlatformRepository<ID : Any, E : Any>(
     }
 
     override fun load(identifier: ID, processingContext: ProcessingContext): CompletableFuture<ManagedEntity<ID, E>> {
-        val entityId = entityIdentifierFor(identifier, processingContext)
+        val entityId = entityIdentifier()
         processingContext.putResource(CurrentEntityContext.RESOURCE_KEY, entityId)
         val startTime = System.nanoTime()
         return delegate.load(identifier, processingContext)
@@ -59,22 +57,12 @@ class AxoniqPlatformRepository<ID : Any, E : Any>(
     }
 
     override fun loadOrCreate(identifier: ID, processingContext: ProcessingContext): CompletableFuture<ManagedEntity<ID, E>> {
-        val entityId = entityIdentifierFor(identifier, processingContext)
-        // Shared counter the event-store wrapper bumps for each sourced event. After loadOrCreate
-        // completes, a zero count means no prior events existed → the framework created a fresh
-        // entity. Counting once here (rather than registering creation unconditionally) keeps the
-        // Creations/min rate aligned with reality — without this, every redeem/update on an existing
-        // event-sourced entity would be reported as a creation too.
-        val sourcedCounter = AtomicLong(0)
+        val entityId = entityIdentifier()
         processingContext.putResource(CurrentEntityContext.RESOURCE_KEY, entityId)
-        processingContext.putResource(CurrentEntityContext.COUNTER_KEY, AtomicLong(0))
         val startTime = System.nanoTime()
         return delegate.loadOrCreate(identifier, processingContext).whenComplete { _, error ->
             val duration = System.nanoTime() - startTime
             entityMetricsRegistry.registerLoad(entityId, duration, success = error == null)
-            if (error == null && sourcedCounter.get() == 0L) {
-                entityMetricsRegistry.registerCreation(entityId)
-            }
             HandlerMeasurement.onContext(processingContext) {
                 it.registerMetricValue(LoadModelMetric(identifier = "load:${entityType().simpleName}"), duration)
             }
@@ -89,17 +77,7 @@ class AxoniqPlatformRepository<ID : Any, E : Any>(
         descriptor.describeWrapperOf(delegate)
     }
 
-    private fun entityIdentifierFor(identifier: ID, processingContext: ProcessingContext): EntityStatisticIdentifier {
-        val messageInfo = HandlerMeasurement.fromContext(processingContext)?.message?.toInformation()
-        return EntityStatisticIdentifier(
-                entityName = entityType().simpleName,
-                entityId = identifier.toString(),
-                messageType = messageInfo?.type ?: UNKNOWN,
-                messageName = messageInfo?.name ?: UNKNOWN,
-        )
-    }
-
-    companion object {
-        private const val UNKNOWN = "Unknown"
+    private fun entityIdentifier(): EntityStatisticIdentifier {
+        return EntityStatisticIdentifier(entityName = entityType().simpleName)
     }
 }

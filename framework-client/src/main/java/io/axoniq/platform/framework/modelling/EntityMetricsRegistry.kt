@@ -31,7 +31,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
- * Registry collecting metrics per entity load by `(entityName, entityId, messageType, messageName)`.
+ * Registry collecting metrics per entity (keyed by entity name only).
  *
  * Drained by [io.axoniq.platform.framework.messaging.HandlerMetricsRegistry] on its periodic reporting
  * tick and shipped to the platform as part of [io.axoniq.platform.framework.api.metrics.StatisticReport].
@@ -47,10 +47,6 @@ class EntityMetricsRegistry {
         if (!success) {
             stats.failureCount.increment()
         }
-    }
-
-    fun registerCreation(identifier: EntityStatisticIdentifier) {
-        entry(identifier).creationCount.increment()
     }
 
     fun registerAdditionalTimer(identifier: EntityStatisticIdentifier, name: String, value: Long, unit: TimeUnit) {
@@ -78,7 +74,6 @@ class EntityMetricsRegistry {
                     it.key,
                     EntityStatistics(
                             count = it.value.totalCount.count(),
-                            creations = it.value.creationCount.count(),
                             failed = it.value.failureCount.count(),
                             timer = it.value.totalTimer.takeSnapshot().toDistribution(),
                             metrics = it.value.metrics.map { (k, v) -> k to v.takeSnapshot().toDistribution() }.toMap()
@@ -96,7 +91,6 @@ class EntityMetricsRegistry {
     private data class EntityRegistryStatistics(
             val totalTimer: Timer,
             val totalCount: RollingCountMeasure = RollingCountMeasure(),
-            val creationCount: RollingCountMeasure = RollingCountMeasure(),
             val failureCount: RollingCountMeasure = RollingCountMeasure(),
             val metrics: MutableMap<String, Timer> = ConcurrentHashMap(),
     )

@@ -21,10 +21,4 @@ import com.fasterxml.jackson.annotation.JsonProperty
 data class EntityStatisticIdentifier(
     @JsonProperty("n")
     val entityName: String,
-    @JsonProperty("i")
-    val entityId: String,
-    @JsonProperty("mt")
-    val messageType: String,
-    @JsonProperty("mn")
-    val messageName: String,
 )
