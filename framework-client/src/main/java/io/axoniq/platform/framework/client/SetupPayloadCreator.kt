@@ -16,8 +16,10 @@
 
 package io.axoniq.platform.framework.client
 
+import io.axoniq.platform.framework.AxoniqPlatformConfiguration
 import io.axoniq.platform.framework.api.AxonServerEventStoreMessageSourceInformation
 import io.axoniq.platform.framework.api.CommandBusInformation
+import io.axoniq.platform.framework.api.DomainEventAccessMode
 import io.axoniq.platform.framework.api.CommonProcessorInformation
 import io.axoniq.platform.framework.api.EventProcessorInformation
 import io.axoniq.platform.framework.api.EventStoreInformation
@@ -61,6 +63,7 @@ import io.axoniq.framework.messaging.queryhandling.distributed.QueryBusConnector
 import org.axonframework.messaging.queryhandling.interception.InterceptingQueryBus
 import java.time.temporal.ChronoUnit
 import java.time.temporal.TemporalAmount
+import kotlin.jvm.optionals.getOrNull
 
 class SetupPayloadCreator(
         private val configuration: Configuration,
@@ -81,7 +84,9 @@ class SetupPayloadCreator(
                         heartbeat = true,
                         threadDump = true,
                         clientStatusUpdates = true,
-                        licenseEntitlement = hasEntitlementManager()
+                        licenseEntitlement = hasEntitlementManager(),
+                        modelInspection = hasStateManager(),
+                        domainEventsInsights = resolveDomainEventAccessMode(),
                 )
         )
     }
@@ -347,6 +352,18 @@ class SetupPayloadCreator(
 
 
     /**
+     * Checks whether a StateManager has been registered, indicating AF5 model inspection support.
+     */
+    private fun hasStateManager(): Boolean {
+        try {
+            val stateManagerClass = Class.forName("org.axonframework.modelling.StateManager")
+            return configuration.hasComponent(stateManagerClass)
+        } catch (_: ClassNotFoundException) {
+            return false
+        }
+    }
+
+    /**
      * Checks whether the PlatformLicenseSource have been configured, in which case we want updates of licenses from Platform.
      */
     private fun hasEntitlementManager(): Boolean {
@@ -357,6 +374,19 @@ class SetupPayloadCreator(
             return false
         }
     }
+
+    /**
+     * Resolves the privacy gate the operator configured for the model-inspection (and AF4
+     * aggregate) routes. Reads it directly off [AxoniqPlatformConfiguration] rather than as a
+     * standalone Configuration component — it is a single property, not a service worth its
+     * own registration. Falls back to [DomainEventAccessMode.NONE] when the configuration
+     * itself is absent, matching the AF4 console-framework-client contract: payloads and
+     * state are redacted unless the operator explicitly opts in.
+     */
+    private fun resolveDomainEventAccessMode(): DomainEventAccessMode =
+            configuration.getOptionalComponent(AxoniqPlatformConfiguration::class.java).getOrNull()
+                    ?.domainEventAccessMode
+                    ?: DomainEventAccessMode.NONE
 }
 
 

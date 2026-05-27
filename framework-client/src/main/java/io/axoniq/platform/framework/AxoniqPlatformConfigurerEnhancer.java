@@ -170,6 +170,14 @@ public class AxoniqPlatformConfigurerEnhancer implements ConfigurationEnhancer {
 
 
         UtilsKt.doOnSubModules(registry, (componentRegistry, module) -> {
+            // Only event processor modules expose a processorName; the doOnSubModules walker
+            // visits every sub-module (event-sourced entities, command/query modules, ...), so
+            // skipping non-processor modules here keeps AxoniqPlatformEventHandlingComponent
+            // from being constructed with a null processor name.
+            if (!(module instanceof PooledStreamingEventProcessorModule)
+                    && !(module instanceof SubscribingEventProcessorModule)) {
+                return null;
+            }
             componentRegistry
                     .registerDecorator(DecoratorDefinition.forType(EventHandlingComponent.class)
                                                           .with((cc, name, delegate) ->
@@ -181,7 +189,7 @@ public class AxoniqPlatformConfigurerEnhancer implements ConfigurationEnhancer {
                                                           .order(0));
 
             return null;
-        });
+        }, true);
     }
 
     /**
