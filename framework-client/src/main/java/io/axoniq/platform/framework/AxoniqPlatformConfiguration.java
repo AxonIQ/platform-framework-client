@@ -16,6 +16,7 @@
 
 package io.axoniq.platform.framework;
 
+import io.axoniq.platform.framework.api.DomainEventAccessMode;
 import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode;
 import org.axonframework.common.BuilderUtils;
 
@@ -44,6 +45,8 @@ public class AxoniqPlatformConfiguration {
 
     private ScheduledExecutorService reportingTaskExecutor;
     private Integer reportingThreadPoolSize = 2;
+
+    private DomainEventAccessMode domainEventAccessMode = DomainEventAccessMode.NONE;
 
     private AxoniqConsoleDlqMode dlqMode = AxoniqConsoleDlqMode.NONE;
     private List<String> dlqDiagnosticsWhitelist = new ArrayList<>();
@@ -155,6 +158,21 @@ public class AxoniqPlatformConfiguration {
         return this;
     }
 
+    /**
+     * Sets the access mode applied to the model-inspection routes (domain events list, entity
+     * state at sequence, timeline replay). The default is {@link DomainEventAccessMode#NONE},
+     * which leaves the routes registered but redacts payloads and state — the operator must
+     * opt in to expose them, matching the AF4 console-framework-client contract.
+     *
+     * @param domainEventAccessMode The mode, never {@code null}
+     * @return The builder for fluent interfacing
+     */
+    public AxoniqPlatformConfiguration domainEventAccessMode(DomainEventAccessMode domainEventAccessMode) {
+        BuilderUtils.assertNonNull(domainEventAccessMode, "Axoniq Platform domainEventAccessMode may not be null");
+        this.domainEventAccessMode = domainEventAccessMode;
+        return this;
+    }
+
     public ScheduledExecutorService getReportingTaskExecutor() {
         if (reportingTaskExecutor == null) {
             reportingTaskExecutor = Executors.newScheduledThreadPool(reportingThreadPoolSize);
@@ -192,6 +210,10 @@ public class AxoniqPlatformConfiguration {
 
     public Long getInitialDelay() {
         return initialDelay;
+    }
+
+    public DomainEventAccessMode getDomainEventAccessMode() {
+        return domainEventAccessMode;
     }
 
     /**

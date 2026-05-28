@@ -114,6 +114,8 @@ data class SupportedFeatures(
         val clientStatusUpdates: Boolean? = false,
         /* Whether the application has the entitlement manager configured, allowing it to receive licenses */
         val licenseEntitlement: Boolean? = false,
+        /* Whether the client supports model inspection (AF5 StateManager-based entity inspection). */
+        val modelInspection: Boolean? = false,
 )
 
 data class Versions(

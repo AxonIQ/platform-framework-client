@@ -58,10 +58,6 @@ class HandlerMeasurement(
     }
 
     fun registerMetricValue(metric: Metric, timeInNs: Long) {
-        if (completedTime != null) {
-            logger.warn { "HandlerMeasurement for handler [${message.type()}] is already completed. Can not register metric [$metric] with value [$timeInNs]. Ignoring." }
-            return
-        }
         registeredMetrics.compute(metric) { _, it ->
             // Sum the metric if it was already registered
             (it ?: 0L) + timeInNs
@@ -69,10 +65,6 @@ class HandlerMeasurement(
     }
 
     fun reportMessageDispatched(messageIdentifier: MessageIdentifier) {
-        if (completedTime != null) {
-            logger.warn { "HandlerMeasurement for handler [${message.type()}] is already completed. Can not report dispatched message [$messageIdentifier]. Ignoring." }
-            return
-        }
         dispatchedMessages.add(messageIdentifier)
     }
 
