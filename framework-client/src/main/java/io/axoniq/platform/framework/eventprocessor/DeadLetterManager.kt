@@ -359,7 +359,12 @@ class DeadLetterManager @JvmOverloads constructor(
         return parsed.map {
             val ehcName = "EventHandlingComponent[${it.processor}][${it.component}]"
             val processor = it.module
-                    .getOptionalComponent(SequencedDeadLetterProcessor::class.java, ehcName)
+                    .getOptionalComponent(EventHandlingComponent::class.java, ehcName)
+                    .map { ehc ->
+                        if(ehc is AxoniqPlatformEventHandlingComponent) {
+                            ehc.delegate as? SequencedDeadLetterProcessor<*>
+                        } else null
+                    }
                     .orElseThrow {
                         IllegalStateException(
                                 "Component [$ehcName] is not wrapped with dead-letter processing")
