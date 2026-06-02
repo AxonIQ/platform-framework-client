@@ -20,12 +20,16 @@ import io.axoniq.framework.messaging.deadletter.GenericDeadLetter
 import io.axoniq.framework.messaging.deadletter.SequencedDeadLetterQueue
 import io.axoniq.framework.messaging.eventhandling.deadletter.DeadLetterQueueConfiguration
 import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode
+import io.axoniq.platform.framework.messaging.HandlerMetricsRegistry
+import io.mockk.mockk
 import org.axonframework.common.configuration.AxonConfiguration
 import org.axonframework.common.configuration.ComponentDefinition
+import org.axonframework.common.configuration.DecoratorDefinition
 import org.axonframework.eventsourcing.configuration.EventSourcingConfigurer
 import org.axonframework.messaging.core.MessageType
 import org.axonframework.messaging.core.QualifiedName
 import org.axonframework.messaging.core.sequencing.SequencingPolicy
+import org.axonframework.messaging.eventhandling.EventHandlingComponent
 import org.axonframework.messaging.eventhandling.EventMessage
 import org.axonframework.messaging.eventhandling.GenericEventMessage
 import org.axonframework.messaging.eventhandling.SimpleEventHandlingComponent
@@ -93,6 +97,10 @@ class RSocketDlqResponderIntegrationTest {
                             // FULL exposure so the assertions on payload + sequence id can run. The
                             // production default is now NONE (see AxoniqPlatformConfiguration#dlqMode).
                             .withBuilder { c -> DeadLetterManager(c, AxoniqConsoleDlqMode.FULL) })
+                    registry.registerComponent(ComponentDefinition.ofType(HandlerMetricsRegistry::class.java)
+                            .withBuilder { mockk(relaxed = true) })
+                    registry.registerComponent(ComponentDefinition.ofType(ProcessorMetricsRegistry::class.java)
+                            .withBuilder { ProcessorMetricsRegistry() })
                 }
                 .messaging { messaging ->
                     messaging.eventProcessing { eventProcessing ->
@@ -111,6 +119,20 @@ class RSocketDlqResponderIntegrationTest {
                                                 cfg.extend(
                                                         DeadLetterQueueConfiguration::class.java,
                                                 ) { DeadLetterQueueConfiguration().enabled() }
+                                            }
+                                            .componentRegistry { moduleRegistry ->
+                                                moduleRegistry.registerDecorator(
+                                                        DecoratorDefinition.forType(EventHandlingComponent::class.java)
+                                                                .with { cc, _, delegate ->
+                                                                    AxoniqPlatformEventHandlingComponent(
+                                                                            delegate,
+                                                                            PROCESSOR_NAME,
+                                                                            cc.getComponent(HandlerMetricsRegistry::class.java),
+                                                                            cc.getComponent(ProcessorMetricsRegistry::class.java),
+                                                                    )
+                                                                }
+                                                                .order(0),
+                                                )
                                             },
                             )
                         }

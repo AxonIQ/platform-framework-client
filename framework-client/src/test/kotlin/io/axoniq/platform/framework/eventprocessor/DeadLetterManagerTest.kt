@@ -158,7 +158,6 @@ class DeadLetterManagerTest {
         @Test
         fun `policy is invoked once per sequence (using the first letter) and the id is stamped across the sequence`() {
             val ehc = ehcWithPolicy { event -> event.identifier() }
-            // The sequence contains m1 + m2 + m3; only the first letter's id is used.
             val sequence = listOf(fakeLetter("m1"), fakeLetter("m2"), fakeLetter("m3"))
             val manager = managerWith(
                     "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to fakeDlq(sequences = listOf(sequence)),
@@ -173,8 +172,6 @@ class DeadLetterManagerTest {
         @Test
         fun `when no EventHandlingComponent is registered the manager falls back to the letter's message id`() {
             val sequence = listOf(fakeLetter("only-letter"))
-            // Note: no ehc parameter — the configurationWith helper registers a relaxed mock that returns
-            // Optional.empty() for EventHandlingComponent lookup, exercising the null-EHC fallback path.
             val manager = managerWith(
                     "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to fakeDlq(sequences = listOf(sequence)),
                     ehc = null,
@@ -409,9 +406,6 @@ class DeadLetterManagerTest {
 
         @Test
         fun `payload over 1024 UTF-8 bytes is truncated without splitting a multi-byte codepoint`() {
-            // "č" is U+010D, two bytes in UTF-8. Filling beyond 1024 bytes guarantees the cutoff
-            // lands inside a multi-byte sequence — a naive byte slice would yield a malformed
-            // codepoint there. The implementation must round down to the previous valid boundary.
             val char = "č"
             val payload = char.repeat(600) // 600 * 2 = 1200 bytes
             val sequence = listOf(fakeLetter("m1", payload = payload))
@@ -428,8 +422,6 @@ class DeadLetterManagerTest {
 
         @Test
         fun `messageType uses the qualified name carried on the message type (primary in AF5)`() {
-            // In AF5 `message.type().name()` is the primary identifier regardless of whether the
-            // payload class is the still-serialised `ByteArray` or the deserialised user type.
             val message = fakeEventMessage(
                     id = "m1",
                     payload = "still serialised".toByteArray(),
@@ -448,7 +440,6 @@ class DeadLetterManagerTest {
 
         @Test
         fun `messageType falls back to payload class fqn when the message type lookup throws`() {
-            // Defensive fallback only — in well-formed AF5 messages this branch should never trip.
             val message = mockk<EventMessage>(relaxed = true)
             every { message.identifier() } returns "m1"
             every { message.payload() } returns "hello"
@@ -588,9 +579,6 @@ class DeadLetterManagerTest {
 
         @Test
         fun `MASKED lettersForSequence returns the paginated slice when looked up by the hashed id`() {
-            // Regression: the detail modal sends the hashed sequence id back; the manager must
-            // re-hash candidate ids while walking the DLQ so the lookup succeeds and the modal
-            // doesn't render an empty slice.
             val letters = (1..5).map { fakeLetter("m$it", payload = "payload-$it") }
             val dlq = fakeDlq(sequences = listOf(letters))
             val ehc = ehcWithPolicy { _ -> "saga-abc" }
@@ -605,7 +593,6 @@ class DeadLetterManagerTest {
 
             assertEquals(5L, response.totalCount)
             assertEquals(3, response.letters.size)
-            // Every letter in the response carries the hashed id verbatim — no double-hashing.
             response.letters.forEach { assertEquals(hashedId, it.sequenceIdentifier) }
         }
 
@@ -643,9 +630,6 @@ class DeadLetterManagerTest {
 
         @Test
         fun `NONE mode never reaches toApiLetter — bypassing the short-circuit throws IllegalStateException`() {
-            // Defence in depth: deadLetters/lettersForSequence short-circuit before serialising
-            // letters in NONE mode. If a future refactor accidentally drops that guard, we want
-            // toApiLetter to fail loudly rather than silently leak <MASKED> placeholders.
             val manager = managerWith(
                     "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to fakeDlq(),
                     dlqMode = AxoniqConsoleDlqMode.NONE,
@@ -668,8 +652,9 @@ class DeadLetterManagerTest {
 
     /**
      * Builds a manager backed by a synthetic configuration that exposes the given DLQs and matching
-     * processors / event-handling components. Pass [ehc] = `null` (the default) to leave the EHC
-     * lookup empty — which exercises the manager's "no EHC available → message-id fallback" path.
+     * processors / event-handling components. Pass [ehc] = `null` (the default) to use a delegate
+     * whose `sequenceIdentifierFor` returns null — exercises the manager's policy-null → message-id
+     * fallback path.
      */
     private fun managerWith(
             vararg dlqsByName: Pair<String, SequencedDeadLetterQueue<EventMessage>>,
@@ -692,13 +677,17 @@ class DeadLetterManagerTest {
             val match = Regex("""^DeadLetterQueue\[EventHandlingComponent\[([^]]+)]\[(.+)]]$""").find(name)
             if (match != null) {
                 val ehcName = "EventHandlingComponent[${match.groupValues[1]}][${match.groupValues[2]}]"
-                val processor = mockk<SequencedDeadLetterProcessor<EventMessage>>(relaxed = true)
-                every {
-                    module.getOptionalComponent(SequencedDeadLetterProcessor::class.java, ehcName)
-                } returns Optional.of(processor)
+
+                val delegate = ehc ?: defaultDelegateMock()
+                val wrapper = AxoniqPlatformEventHandlingComponent(
+                        delegate,
+                        match.groupValues[1],
+                        mockk(relaxed = true),
+                        mockk(relaxed = true),
+                )
                 every {
                     module.getOptionalComponent(EventHandlingComponent::class.java, ehcName)
-                } returns Optional.ofNullable(ehc)
+                } returns Optional.of(wrapper)
             }
         }
         val root = mockk<Configuration>(relaxed = true)
@@ -706,11 +695,22 @@ class DeadLetterManagerTest {
         return root
     }
 
+    private fun defaultDelegateMock(): EventHandlingComponent {
+        val mock = mockk<EventHandlingComponent>(
+                moreInterfaces = arrayOf(SequencedDeadLetterProcessor::class),
+                relaxed = true,
+        )
+        @Suppress("UNCHECKED_CAST")
+        every { mock.sequenceIdentifierFor(any(), any()) } answers { null as Any }
+        return mock
+    }
+
     private fun ehcWithPolicy(policy: (EventMessage) -> Any?): EventHandlingComponent {
-        val ehc = mockk<EventHandlingComponent>(relaxed = true)
-        // `sequenceIdentifierFor` is `@NullMarked` non-null in source, but in real life policies do
-        // return `null` (and the manager's branch on that is what we want to exercise). MockK lets
-        // us answer with whatever object reference; the unchecked cast keeps the compiler happy.
+        val ehc = mockk<EventHandlingComponent>(
+                moreInterfaces = arrayOf(SequencedDeadLetterProcessor::class),
+                relaxed = true,
+        )
+
         @Suppress("UNCHECKED_CAST")
         every { ehc.sequenceIdentifierFor(any(), any()) } answers {
             policy(firstArg<EventMessage>()) as Any
