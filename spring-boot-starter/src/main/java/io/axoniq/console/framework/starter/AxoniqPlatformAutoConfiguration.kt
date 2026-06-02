@@ -57,6 +57,8 @@ class AxoniqPlatformAutoConfiguration {
                 .secure(properties.isSecure)
                 .initialDelay(properties.initialDelay)
                 .domainEventAccessMode(properties.domainEventAccessMode)
+                .dlqMode(properties.dlqMode)
+                .also { properties.dlqDiagnosticsWhitelist.forEach(it::addDlqDiagnosticsWhitelistKey) }
     }
 
     private fun getApplicationName(

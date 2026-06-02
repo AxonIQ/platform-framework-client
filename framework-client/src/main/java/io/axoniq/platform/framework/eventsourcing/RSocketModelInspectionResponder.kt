@@ -20,6 +20,7 @@ import com.fasterxml.jackson.annotation.JsonAutoDetect
 import com.fasterxml.jackson.annotation.PropertyAccessor
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.SerializationFeature
+import io.axoniq.platform.framework.AxoniqPlatformConfiguration
 import io.axoniq.platform.framework.api.*
 import io.axoniq.platform.framework.client.RSocketHandlerRegistrar
 import io.axoniq.platform.framework.truncateToBytes
@@ -59,16 +60,18 @@ open class RSocketModelInspectionResponder(
     }
 
     /**
-     * Privacy gate read once at first access from the Configuration. Falls back to
-     * [DomainEventAccessMode.NONE] when no mode was registered, matching the AF4
-     * console-framework-client contract: payloads and state are redacted unless the operator
-     * explicitly opts in.
+     * Privacy gate read once at first access, sourced directly from [AxoniqPlatformConfiguration]
+     * rather than as a standalone Configuration component — it's a single property, not a service
+     * worth its own registration. Falls back to [DomainEventAccessMode.NONE] when the
+     * configuration itself is absent, matching the AF4 console-framework-client contract:
+     * payloads and state are redacted unless the operator explicitly opts in.
      *
-     * Visible for tests so gating can be exercised by registering a custom mode in the
+     * Visible for tests so gating can be exercised by registering a custom configuration in the
      * configuration mock.
      */
     internal val accessMode: DomainEventAccessMode by lazy {
-        configuration.getOptionalComponent(DomainEventAccessMode::class.java).getOrNull()
+        configuration.getOptionalComponent(AxoniqPlatformConfiguration::class.java).getOrNull()
+                ?.getDomainEventAccessMode()
                 ?: DomainEventAccessMode.NONE
     }
 

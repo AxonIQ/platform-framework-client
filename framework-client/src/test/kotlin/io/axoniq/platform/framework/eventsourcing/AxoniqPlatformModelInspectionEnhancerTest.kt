@@ -24,6 +24,7 @@ import org.axonframework.common.configuration.ComponentDefinition
 import org.axonframework.common.configuration.ComponentRegistry
 import org.axonframework.eventsourcing.eventstore.EventStorageEngine
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 
 /**
@@ -41,49 +42,60 @@ import org.junit.jupiter.api.Test
  * StateManager is intentionally NOT probed: ModellingConfigurationDefaults registers it at
  * Integer.MAX_VALUE, after this enhancer's order, so the probe would falsely return false
  * during a real boot.
+ *
+ * Tests are grouped per behavioural branch via [Nested] so failures point straight at the
+ * guard scenario they belong to.
  */
 class AxoniqPlatformModelInspectionEnhancerTest {
 
     private val enhancer = AxoniqPlatformModelInspectionEnhancer()
 
-    @Test
-    fun `registers the responder when EventStorageEngine and RSocketHandlerRegistrar are both present`() {
-        val registry = mockk<ComponentRegistry>(relaxed = true)
-        every { registry.hasComponent(EventStorageEngine::class.java) } returns true
-        every { registry.hasComponent(RSocketHandlerRegistrar::class.java) } returns true
+    @Nested
+    inner class Registration {
 
-        enhancer.enhance(registry)
+        @Test
+        fun `registers the responder when EventStorageEngine and RSocketHandlerRegistrar are both present`() {
+            val registry = mockk<ComponentRegistry>(relaxed = true)
+            every { registry.hasComponent(EventStorageEngine::class.java) } returns true
+            every { registry.hasComponent(RSocketHandlerRegistrar::class.java) } returns true
 
-        verify(exactly = 1) { registry.registerComponent(any<ComponentDefinition<*>>()) }
+            enhancer.enhance(registry)
+
+            verify(exactly = 1) { registry.registerComponent(any<ComponentDefinition<*>>()) }
+        }
+
+        @Test
+        fun `skips registration when EventStorageEngine is missing — typical AF4 application`() {
+            val registry = mockk<ComponentRegistry>(relaxed = true)
+            every { registry.hasComponent(EventStorageEngine::class.java) } returns false
+            every { registry.hasComponent(RSocketHandlerRegistrar::class.java) } returns true
+
+            enhancer.enhance(registry)
+
+            verify(exactly = 0) { registry.registerComponent(any<ComponentDefinition<*>>()) }
+        }
+
+        @Test
+        fun `skips registration when RSocketHandlerRegistrar is missing — console client not wired`() {
+            val registry = mockk<ComponentRegistry>(relaxed = true)
+            every { registry.hasComponent(RSocketHandlerRegistrar::class.java) } returns false
+
+            enhancer.enhance(registry)
+
+            verify(exactly = 0) { registry.registerComponent(any<ComponentDefinition<*>>()) }
+        }
     }
 
-    @Test
-    fun `skips registration when EventStorageEngine is missing — typical AF4 application`() {
-        val registry = mockk<ComponentRegistry>(relaxed = true)
-        every { registry.hasComponent(EventStorageEngine::class.java) } returns false
-        every { registry.hasComponent(RSocketHandlerRegistrar::class.java) } returns true
+    @Nested
+    inner class Order {
 
-        enhancer.enhance(registry)
-
-        verify(exactly = 0) { registry.registerComponent(any<ComponentDefinition<*>>()) }
-    }
-
-    @Test
-    fun `skips registration when RSocketHandlerRegistrar is missing — console client not wired`() {
-        val registry = mockk<ComponentRegistry>(relaxed = true)
-        every { registry.hasComponent(RSocketHandlerRegistrar::class.java) } returns false
-
-        enhancer.enhance(registry)
-
-        verify(exactly = 0) { registry.registerComponent(any<ComponentDefinition<*>>()) }
-    }
-
-    @Test
-    fun `runs after the platform configurer enhancer so its components are visible`() {
-        // The responder builder reads multiple components from the configuration during
-        // start; this enhancer must run AFTER the platform enhancer that registers them.
-        // Concretely: order > PLATFORM_ENHANCER_ORDER (currently +1 above it).
-        val platformOrder = io.axoniq.platform.framework.AxoniqPlatformConfigurerEnhancer.PLATFORM_ENHANCER_ORDER
-        assertEquals(platformOrder + 1, enhancer.order())
+        @Test
+        fun `runs after the platform configurer enhancer so its components are visible`() {
+            // The responder builder reads multiple components from the configuration during
+            // start; this enhancer must run AFTER the platform enhancer that registers them.
+            // Concretely: order > PLATFORM_ENHANCER_ORDER (currently +1 above it).
+            val platformOrder = io.axoniq.platform.framework.AxoniqPlatformConfigurerEnhancer.PLATFORM_ENHANCER_ORDER
+            assertEquals(platformOrder + 1, enhancer.order())
+        }
     }
 }

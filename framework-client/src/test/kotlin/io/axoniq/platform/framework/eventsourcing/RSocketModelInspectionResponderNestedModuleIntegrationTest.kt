@@ -16,6 +16,8 @@
 
 package io.axoniq.platform.framework.eventsourcing
 
+import io.axoniq.platform.framework.AxoniqPlatformConfiguration
+import io.axoniq.platform.framework.api.DomainEventAccessMode
 import io.axoniq.platform.framework.api.ModelEntityStateAtSequenceQuery
 import io.axoniq.platform.framework.client.RSocketHandlerRegistrar
 import io.axoniq.platform.framework.client.strategy.CborJackson3EncodingStrategy
@@ -35,10 +37,10 @@ import org.axonframework.messaging.eventhandling.GenericEventMessage
 import org.axonframework.modelling.SimpleStateManager
 import org.axonframework.modelling.StateManager
 import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 
 /**
@@ -52,9 +54,9 @@ import org.junit.jupiter.api.Test
  *   - [MySubModule] — a hand-rolled [BaseModule] that registers its own [StateManager] and an
  *     {@link InnerEntity} inside it via `registerModule(EventSourcedEntityModule.autodetected(...))`.
  *
- * Both entities must surface in the registered-entities query, and queries against the inner one
- * must reconstruct state correctly — proving the model-inspection enhancer's submodule walk
- * reaches arbitrary depth, not just one level.
+ * Both entities must surface in the registered-entities query, and queries against the inner
+ * one must reconstruct state correctly — proving the model-inspection enhancer's submodule
+ * walk reaches arbitrary depth, not just one level.
  */
 class RSocketModelInspectionResponderNestedModuleIntegrationTest {
 
@@ -68,6 +70,14 @@ class RSocketModelInspectionResponderNestedModuleIntegrationTest {
                 .componentRegistry { cr ->
                     cr.registerComponent(ComponentDefinition.ofType(RSocketHandlerRegistrar::class.java)
                             .withBuilder { RSocketHandlerRegistrar(CborJackson3EncodingStrategy()) })
+                    // State-reconstruction assertions below require FULL access; without an
+                    // explicitly registered platform configuration the responder defaults to
+                    // NONE and nulls state.
+                    cr.registerComponent(ComponentDefinition.ofType(AxoniqPlatformConfiguration::class.java)
+                            .withBuilder {
+                                AxoniqPlatformConfiguration("test-env", "test-token", "test-app")
+                                        .domainEventAccessMode(DomainEventAccessMode.FULL)
+                            })
                     // The custom BaseModule lives directly under the root component registry.
                     // Inside it, a further sub-module registers InnerEntity — two levels deep.
                     cr.registerModule(MySubModule())
@@ -92,42 +102,50 @@ class RSocketModelInspectionResponderNestedModuleIntegrationTest {
 
     private fun event(payload: Any) = GenericEventMessage(MessageType(payload.javaClass), payload)
 
-    @Test
-    fun `registered entities query surfaces both top-level and deeply nested entities`() {
-        val result = responder.handleRegisteredEntities()
-        val typeNames = result.entities.map { it.entityType }.toSet()
+    @Nested
+    inner class RegisteredEntities {
 
-        assertTrue(typeNames.contains(OuterEntity::class.java.name),
-                "expected OuterEntity (top-level) to be registered")
-        assertTrue(typeNames.contains(InnerEntity::class.java.name),
-                "expected InnerEntity (nested inside MySubModule) to be registered — submodule walker must reach it")
+        @Test
+        fun `query surfaces both top-level and deeply nested entities`() {
+            val result = responder.handleRegisteredEntities()
+            val typeNames = result.entities.map { it.entityType }.toSet()
+
+            assertTrue(typeNames.contains(OuterEntity::class.java.name),
+                    "expected OuterEntity (top-level) to be registered")
+            assertTrue(typeNames.contains(InnerEntity::class.java.name),
+                    "expected InnerEntity (nested inside MySubModule) to be registered — submodule walker must reach it")
+        }
     }
 
-    @Test
-    fun `state at sequence reconstructs the inner entity in the nested module`() {
-        val result = responder.handleEntityStateAtSequence(ModelEntityStateAtSequenceQuery(
-                entityType = InnerEntity::class.java.name,
-                entityId = "INNER-1",
-                idType = String::class.java.name,
-                maxSequenceNumber = -1,
-        ))
+    @Nested
+    inner class StateAtSequence {
 
-        assertNotNull(result.state, "state must be reconstructed for the inner entity")
-        assertTrue(result.state!!.contains("\"open\":false"), result.state)
-        assertTrue(result.state!!.contains("\"value\":42"), result.state)
-    }
+        @Test
+        fun `reconstructs the inner entity in the nested module`() {
+            val result = responder.handleEntityStateAtSequence(ModelEntityStateAtSequenceQuery(
+                    entityType = InnerEntity::class.java.name,
+                    entityId = "INNER-1",
+                    idType = String::class.java.name,
+                    maxSequenceNumber = -1,
+            ))
 
-    @Test
-    fun `state at sequence reconstructs the outer entity registered at the root`() {
-        val result = responder.handleEntityStateAtSequence(ModelEntityStateAtSequenceQuery(
-                entityType = OuterEntity::class.java.name,
-                entityId = "OUTER-1",
-                idType = String::class.java.name,
-                maxSequenceNumber = -1,
-        ))
+            assertNotNull(result.state, "state must be reconstructed for the inner entity")
+            assertTrue(result.state!!.contains("\"open\":false"), result.state)
+            assertTrue(result.state!!.contains("\"value\":42"), result.state)
+        }
 
-        assertNotNull(result.state)
-        assertTrue(result.state!!.contains("\"colour\":\"blue\""), result.state)
+        @Test
+        fun `reconstructs the outer entity registered at the root`() {
+            val result = responder.handleEntityStateAtSequence(ModelEntityStateAtSequenceQuery(
+                    entityType = OuterEntity::class.java.name,
+                    entityId = "OUTER-1",
+                    idType = String::class.java.name,
+                    maxSequenceNumber = -1,
+            ))
+
+            assertNotNull(result.state)
+            assertTrue(result.state!!.contains("\"colour\":\"blue\""), result.state)
+        }
     }
 
     // ------------------------------------------------------------------------------------------
