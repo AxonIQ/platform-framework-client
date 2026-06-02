@@ -71,3 +71,28 @@ data class DeadLetterProcessRequest(
     val processingGroup: String,
     val messageIdentifier: String
 )
+
+/**
+ * Request paginated letters belonging to a single sequence inside the DLQ. Used by the platform UI
+ * detail modal to browse long sequences without loading them all up-front.
+ *
+ * @param processingGroup     The processing group / DLQ identifier.
+ * @param sequenceIdentifier  Synthetic sequence id as previously returned by [DeadLetter.sequenceIdentifier].
+ * @param offset              Zero-based offset into the sequence.
+ * @param size                Number of letters to return (capped server-side).
+ */
+data class FetchSequenceLettersRequest(
+    val processingGroup: String,
+    val sequenceIdentifier: String,
+    val offset: Int,
+    val size: Int,
+)
+
+/**
+ * Response payload for [FetchSequenceLettersRequest]. Carries the requested slice of letters along
+ * with the total number of letters in the sequence so the UI can render full pagination.
+ */
+data class SequenceLettersResponse(
+    val letters: List<DeadLetter>,
+    val totalCount: Long = letters.size.toLong(),
+)

@@ -104,8 +104,10 @@ data class SupportedFeatures(
         val pauseReports: Boolean? = false,
         /* Whether the client supports thread dumps.*/
         val threadDump: Boolean? = false,
-        /* Whether the client supports DLQ insights. Can be FULL, LIMITED, MASKED, or NONE (default).*/
-        val deadLetterQueuesInsights: AxoniqConsoleDlqMode = AxoniqConsoleDlqMode.NONE,
+        /* DLQ insight level for this client. `null` means the application has no DLQ library on
+         * its classpath, so DLQ inspection isn't a feature of this client at all (distinct from
+         * `NONE`, which means the feature exists but the operator hid all letter data). */
+        val deadLetterQueuesInsights: AxoniqConsoleDlqMode? = null,
         /* Whether the client supports domain events insights. Can be FULL, LOAD_DOMAIN_STATE_ONLY, PREVIEW_PAYLOAD_ONLY, or NONE (default).*/
         val domainEventsInsights: DomainEventAccessMode = DomainEventAccessMode.NONE,
         /* Whether the client supports client status updates .*/

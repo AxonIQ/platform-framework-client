@@ -18,6 +18,7 @@ package io.axoniq.platform.framework.client
 
 import io.axoniq.platform.framework.AxoniqPlatformConfiguration
 import io.axoniq.platform.framework.api.AxonServerEventStoreMessageSourceInformation
+import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode
 import io.axoniq.platform.framework.api.CommandBusInformation
 import io.axoniq.platform.framework.api.DomainEventAccessMode
 import io.axoniq.platform.framework.api.CommonProcessorInformation
@@ -87,6 +88,7 @@ class SetupPayloadCreator(
                         licenseEntitlement = hasEntitlementManager(),
                         modelInspection = hasStateManager(),
                         domainEventsInsights = resolveDomainEventAccessMode(),
+                        deadLetterQueuesInsights = resolveDeadLetterQueuesInsights(),
                 )
         )
     }
@@ -361,6 +363,38 @@ class SetupPayloadCreator(
         } catch (_: ClassNotFoundException) {
             return false
         }
+    }
+
+    /**
+     * Resolves the [AxoniqPlatformConfiguration] from the application configuration, returning `null`
+     * when the platform module hasn't been wired (legacy or non-Spring setups). The caller falls back
+     * to `NONE` so applications that haven't deliberately opted in stay closed by default — exposing
+     * letter contents (which can include personal data) requires an explicit `dlqMode` override
+     * (`LIMITED`/`MASKED`/`FULL`) on the application's [AxoniqPlatformConfiguration].
+     */
+    private fun axoniqPlatformConfiguration(): AxoniqPlatformConfiguration? =
+            configuration.getOptionalComponent(AxoniqPlatformConfiguration::class.java).orElse(null)
+
+    /**
+     * Returns the DLQ insight level reported on the setup payload, or `null` when this application
+     * has no DLQ library on its classpath (in which case DLQ inspection isn't a feature of this
+     * client at all — semantically distinct from [AxoniqConsoleDlqMode.NONE], which means the feature
+     * exists but the operator hid all letter data).
+     */
+    private fun resolveDeadLetterQueuesInsights(): AxoniqConsoleDlqMode? {
+        if (!isDeadLetterLibraryAvailable()) return null
+        return axoniqPlatformConfiguration()?.dlqMode ?: AxoniqConsoleDlqMode.NONE
+    }
+
+    private fun isDeadLetterLibraryAvailable(): Boolean = try {
+        Class.forName(
+                "io.axoniq.framework.messaging.deadletter.SequencedDeadLetterQueue",
+                false,
+                SetupPayloadCreator::class.java.classLoader,
+        )
+        true
+    } catch (_: ClassNotFoundException) {
+        false
     }
 
     /**

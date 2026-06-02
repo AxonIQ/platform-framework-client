@@ -29,17 +29,14 @@ import org.axonframework.messaging.core.Message
 import org.axonframework.messaging.core.MessageStream
 import org.axonframework.messaging.core.QualifiedName
 import org.axonframework.messaging.core.unitofwork.ProcessingContext
-import org.axonframework.messaging.eventhandling.EventHandler
-import org.axonframework.messaging.eventhandling.EventHandlerRegistry
 import org.axonframework.messaging.eventhandling.EventHandlingComponent
 import org.axonframework.messaging.eventhandling.EventMessage
 import org.axonframework.messaging.eventhandling.processing.streaming.segmenting.Segment
-import org.axonframework.messaging.eventhandling.replay.ResetContext
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 
 class AxoniqPlatformEventHandlingComponent(
-        private val delegate: EventHandlingComponent,
+        val delegate: EventHandlingComponent,
         private val processorName: String,
         private val handlerMetricsRegistry: HandlerMetricsRegistry,
         private val processorMetricRegistry: ProcessorMetricsRegistry
