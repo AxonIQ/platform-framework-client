@@ -96,9 +96,8 @@ class EntityMetricsRegistry {
     )
 
     companion object {
-        const val METRIC_LOCK_WAIT_TIME = "lock_wait_time"
-        const val METRIC_EVENT_COMMIT_TIME = "event_commit_time"
-        const val METRIC_EVENT_STREAM_SIZE = "event_stream_size"
-        const val METRIC_CRITERIA_SIZE = "criteria_size"
+        const val METRIC_EVENT_COMMIT_TIME = "tmr_event_commit"
+        const val METRIC_EVENT_STREAM_SIZE = "cntr_agg_events_size"
+        const val METRIC_CRITERIA_SIZE = "cntr_criteria_size"
     }
 }
