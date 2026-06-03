@@ -21,6 +21,7 @@ import io.axoniq.framework.messaging.deadletter.SequencedDeadLetterQueue
 import io.axoniq.framework.messaging.eventhandling.deadletter.DeadLetterQueueConfiguration
 import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode
 import io.axoniq.platform.framework.messaging.HandlerMetricsRegistry
+import io.axoniq.platform.framework.modelling.EntityMetricsRegistry
 import io.mockk.mockk
 import org.axonframework.common.configuration.AxonConfiguration
 import org.axonframework.common.configuration.ComponentDefinition
@@ -101,6 +102,8 @@ class RSocketDlqResponderIntegrationTest {
                             .withBuilder { mockk(relaxed = true) })
                     registry.registerComponent(ComponentDefinition.ofType(ProcessorMetricsRegistry::class.java)
                             .withBuilder { ProcessorMetricsRegistry() })
+                    registry.registerComponent(ComponentDefinition.ofType(EntityMetricsRegistry::class.java)
+                            .withBuilder { EntityMetricsRegistry() })
                 }
                 .messaging { messaging ->
                     messaging.eventProcessing { eventProcessing ->

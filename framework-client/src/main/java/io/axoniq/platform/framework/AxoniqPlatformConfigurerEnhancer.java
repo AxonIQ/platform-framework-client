@@ -37,6 +37,7 @@ import io.axoniq.platform.framework.eventprocessor.RSocketProcessorResponder;
 import io.axoniq.platform.framework.messaging.AxoniqPlatformCommandBus;
 import io.axoniq.platform.framework.messaging.AxoniqPlatformQueryBus;
 import io.axoniq.platform.framework.messaging.HandlerMetricsRegistry;
+import io.axoniq.platform.framework.modelling.EntityMetricsRegistry;
 import org.axonframework.common.configuration.ComponentDefinition;
 import org.axonframework.common.configuration.ComponentRegistry;
 import org.axonframework.common.configuration.Configuration;
@@ -136,11 +137,15 @@ public class AxoniqPlatformConfigurerEnhancer implements ConfigurationEnhancer {
                                            .onStart(Phase.EXTERNAL_CONNECTIONS, c -> {
                                            }))
                 .registerComponent(ComponentDefinition
+                                           .ofType(EntityMetricsRegistry.class)
+                                           .withBuilder(c -> new EntityMetricsRegistry()))
+                .registerComponent(ComponentDefinition
                                            .ofType(HandlerMetricsRegistry.class)
                                            .withBuilder(c -> new HandlerMetricsRegistry(
                                                    c.getComponent(AxoniqConsoleRSocketClient.class),
                                                    c.getComponent(PlatformClientConnectionService.class),
-                                                   c.getComponent(AxoniqPlatformConfiguration.class))))
+                                                   c.getComponent(AxoniqPlatformConfiguration.class),
+                                                   c.getComponent(EntityMetricsRegistry.class))))
                 .registerComponent(ComponentDefinition
                                            .ofType(ApplicationThreadDumpProvider.class)
                                            .withBuilder(c -> new ApplicationThreadDumpProvider()))

@@ -17,9 +17,11 @@
 package io.axoniq.platform.framework.eventsourcing;
 
 import io.axoniq.platform.framework.messaging.HandlerMetricsRegistry;
+import io.axoniq.platform.framework.modelling.EntityMetricsRegistry;
 import org.axonframework.common.configuration.ComponentRegistry;
 import org.axonframework.common.configuration.DecoratorDefinition;
 import org.axonframework.eventsourcing.eventstore.EventStorageEngine;
+import org.axonframework.eventsourcing.eventstore.EventStore;
 
 /**
  * Holder of the actual decorator registration against {@code axon-eventsourcing} types. Kept separate from
@@ -37,7 +39,15 @@ final class EventSourcingDecorators {
                 DecoratorDefinition.forType(EventStorageEngine.class)
                                    .with((c, name, delegate) -> {
                                        HandlerMetricsRegistry metricsRegistry = c.getComponent(HandlerMetricsRegistry.class);
-                                       return new AxoniqPlatformEventStorageEngine(delegate, metricsRegistry);
+                                       EntityMetricsRegistry entityMetricsRegistry = c.getComponent(EntityMetricsRegistry.class);
+                                       return new AxoniqPlatformEventStorageEngine(delegate, metricsRegistry, entityMetricsRegistry);
+                                   }).order(Integer.MAX_VALUE));
+
+        registry.registerDecorator(
+                DecoratorDefinition.forType(EventStore.class)
+                                   .with((c, name, delegate) -> {
+                                       EntityMetricsRegistry entityMetricsRegistry = c.getComponent(EntityMetricsRegistry.class);
+                                       return new AxoniqPlatformEventStore(delegate, entityMetricsRegistry);
                                    }).order(Integer.MAX_VALUE));
     }
 }

@@ -35,6 +35,7 @@ import io.axoniq.platform.framework.client.AxoniqConsoleRSocketClient
 import io.axoniq.platform.framework.client.PlatformClientConnectionObserver
 import io.axoniq.platform.framework.client.PlatformClientConnectionService
 import io.axoniq.platform.framework.computeIfAbsentWithRetry
+import io.axoniq.platform.framework.modelling.EntityMetricsRegistry
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.micrometer.core.instrument.Timer
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -46,7 +47,8 @@ import java.util.concurrent.TimeUnit
 class HandlerMetricsRegistry(
         private val axoniqConsoleRSocketClient: AxoniqConsoleRSocketClient,
         private val platformClientConnectionService: PlatformClientConnectionService,
-        private val properties: AxoniqPlatformConfiguration
+        private val properties: AxoniqPlatformConfiguration,
+        private val entityMetricsRegistry: EntityMetricsRegistry,
 ) : PlatformClientConnectionObserver {
     private val logger = KotlinLogging.logger { }
     private var reportTask: ScheduledFuture<*>? = null
@@ -118,7 +120,8 @@ class HandlerMetricsRegistry(
                         DispatcherStatistics(it.value.count())
                     )
                 },
-            aggregates = emptyList()
+            aggregates = emptyList(),
+            entities = entityMetricsRegistry.getStats(),
         )
         return flow
     }

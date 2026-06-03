@@ -142,6 +142,23 @@ fun createTimer(meterRegistry: MeterRegistry, name: String): Timer {
 }
 
 /**
+ * Same as [createTimer] but with higher percentile precision, suitable for count-style metrics
+ * (e.g. event_stream_size, criteria_size) where the recorded values are small integers and the
+ * default HdrHistogram bucketing reports 1.0 as ~0.98 or 0 as ~0.98. Precision 3 gives sub-1%
+ * relative error which is enough to round-trip small integers cleanly, at the cost of a few KB
+ * extra heap per Timer — acceptable given the bounded number of count metrics per entity.
+ */
+fun createCountTimer(meterRegistry: MeterRegistry, name: String): Timer {
+    return Timer
+            .builder(name)
+            .publishPercentiles(1.00, 0.95, 0.90, 0.50, 0.01)
+            .distributionStatisticExpiry(Duration.ofMinutes(5))
+            .distributionStatisticBufferLength(5)
+            .percentilePrecision(3)
+            .register(meterRegistry)
+}
+
+/**
  * Truncates the string to ensure it doesn't exceed the specified maximum byte size.
  *
  * If the string's byte representation (UTF-8 encoding) is larger than [maxBytes],

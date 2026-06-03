@@ -39,7 +39,7 @@ final class ModellingDecorators {
                                                           if(delegate instanceof AxoniqPlatformStateManager) {
                                                               return delegate;
                                                           }
-                                                          return new AxoniqPlatformStateManager(delegate);
+                                                          return new AxoniqPlatformStateManager(delegate, cc.getComponent(EntityMetricsRegistry.class));
                                                       })
                                                       .order(Integer.MAX_VALUE));
 
@@ -48,12 +48,12 @@ final class ModellingDecorators {
                     .registerDecorator(DecoratorDefinition.forType(Repository.class)
                                                           .with((cc, name, delegate) ->
                                                                         delegate instanceof AxoniqPlatformRepository<?,?> ? delegate :
-                                                                        new AxoniqPlatformRepository<>(delegate))
+                                                                        new AxoniqPlatformRepository<>(delegate, cc.getComponent(EntityMetricsRegistry.class)))
                                                           .order(Integer.MIN_VALUE))
                     .registerDecorator(DecoratorDefinition.forType(StateManager.class)
                                                           .with((cc, name, delegate) ->
                                                                   delegate instanceof AxoniqPlatformStateManager ?  delegate :
-                                                                        new AxoniqPlatformStateManager(delegate))
+                                                                        new AxoniqPlatformStateManager(delegate, cc.getComponent(EntityMetricsRegistry.class)))
                                                           .order(Integer.MAX_VALUE));
             return null;
         }, true);

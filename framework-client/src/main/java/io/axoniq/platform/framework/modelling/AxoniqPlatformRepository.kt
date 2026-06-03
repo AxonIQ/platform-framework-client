@@ -16,6 +16,7 @@
 
 package io.axoniq.platform.framework.modelling
 
+import io.axoniq.platform.framework.api.metrics.EntityStatisticIdentifier
 import io.axoniq.platform.framework.api.metrics.LoadModelMetric
 import io.axoniq.platform.framework.messaging.HandlerMeasurement
 import org.axonframework.common.infra.ComponentDescriptor
@@ -26,6 +27,7 @@ import java.util.concurrent.CompletableFuture
 
 class AxoniqPlatformRepository<ID : Any, E : Any>(
         private val delegate: Repository<ID, E>,
+        private val entityMetricsRegistry: EntityMetricsRegistry,
 ) : Repository.LifecycleManagement<ID, E> {
     override fun attach(entity: ManagedEntity<ID, E>, processingContext: ProcessingContext): ManagedEntity<ID, E> {
         val lfcm = delegate as Repository.LifecycleManagement<ID, E>
@@ -41,19 +43,26 @@ class AxoniqPlatformRepository<ID : Any, E : Any>(
     }
 
     override fun load(identifier: ID, processingContext: ProcessingContext): CompletableFuture<ManagedEntity<ID, E>> {
+        val entityId = entityIdentifier()
+        processingContext.putResource(CurrentEntityContext.RESOURCE_KEY, entityId)
         val startTime = System.nanoTime()
-        return delegate.load(identifier, processingContext).whenComplete { _, _ ->
-            val duration = System.nanoTime() - startTime
-            HandlerMeasurement.onContext(processingContext) {
-                it.registerMetricValue(LoadModelMetric(identifier = "load:${entityType().simpleName}"), duration)
-            }
-        }
+        return delegate.load(identifier, processingContext)
+                .whenComplete { _, error ->
+                    val duration = System.nanoTime() - startTime
+                    entityMetricsRegistry.registerLoad(entityId, duration, success = error == null)
+                    HandlerMeasurement.onContext(processingContext) {
+                        it.registerMetricValue(LoadModelMetric(identifier = "load:${entityType().simpleName}"), duration)
+                    }
+                }
     }
 
     override fun loadOrCreate(identifier: ID, processingContext: ProcessingContext): CompletableFuture<ManagedEntity<ID, E>> {
+        val entityId = entityIdentifier()
+        processingContext.putResource(CurrentEntityContext.RESOURCE_KEY, entityId)
         val startTime = System.nanoTime()
-        return delegate.loadOrCreate(identifier, processingContext).whenComplete { _, _ ->
+        return delegate.loadOrCreate(identifier, processingContext).whenComplete { _, error ->
             val duration = System.nanoTime() - startTime
+            entityMetricsRegistry.registerLoad(entityId, duration, success = error == null)
             HandlerMeasurement.onContext(processingContext) {
                 it.registerMetricValue(LoadModelMetric(identifier = "load:${entityType().simpleName}"), duration)
             }
@@ -66,5 +75,9 @@ class AxoniqPlatformRepository<ID : Any, E : Any>(
 
     override fun describeTo(descriptor: ComponentDescriptor) {
         descriptor.describeWrapperOf(delegate)
+    }
+
+    private fun entityIdentifier(): EntityStatisticIdentifier {
+        return EntityStatisticIdentifier(entityName = entityType().simpleName)
     }
 }
