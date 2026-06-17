@@ -22,7 +22,7 @@
 
     <groupId>io.axoniq.platform</groupId>
     <artifactId>framework-client-parent</artifactId>
-    <version>5.1.0-SNAPSHOT</version>
+    <version>5.1.1</version>
 
     <modules>
         <module>framework-client-api</module>
