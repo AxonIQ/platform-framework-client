@@ -30,10 +30,13 @@ import io.mockk.every
 import io.mockk.mockk
 import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 
@@ -121,6 +124,57 @@ class AxoniqConsoleRSocketClientIntegrationTest {
 
         // Backoff for first retry is 2^0 = 1 s; allow generous margin.
         await().atMost(10, TimeUnit.SECONDS).until { client.isConnected() }
+    }
+
+    @Test
+    fun `requestStream emits every payload from the server in order and completes`() {
+        val expected = listOf(
+                ModuleVersion(dependency = "axon-messaging", version = "4.9.0"),
+                ModuleVersion(dependency = "axon-configuration", version = "4.9.0"),
+                ModuleVersion(dependency = "axon-test", version = null),
+        )
+        mockServer.streamResponses = expected
+
+        client = buildClient()
+        client.start()
+        await().atMost(5, TimeUnit.SECONDS).until { client.isConnected() }
+
+        val received = client
+                .requestStream("request", MockConsoleServer.STREAM_ROUTE, ModuleVersion::class.java)
+                .collectList()
+                .block(Duration.ofSeconds(5))
+
+        assertEquals(expected, received)
+    }
+
+    @Test
+    fun `requestStream completes without emissions for an empty stream`() {
+        mockServer.streamResponses = emptyList()
+
+        client = buildClient()
+        client.start()
+        await().atMost(5, TimeUnit.SECONDS).until { client.isConnected() }
+
+        val received = client
+                .requestStream("request", MockConsoleServer.STREAM_ROUTE, ModuleVersion::class.java)
+                .collectList()
+                .block(Duration.ofSeconds(5))
+
+        assertTrue(received!!.isEmpty())
+    }
+
+    @Test
+    fun `requestStream propagates an error from the server`() {
+        client = buildClient()
+        client.start()
+        await().atMost(5, TimeUnit.SECONDS).until { client.isConnected() }
+
+        assertThrows(Exception::class.java) {
+            client
+                    .requestStream("request", "unknown.stream.route", ModuleVersion::class.java)
+                    .collectList()
+                    .block(Duration.ofSeconds(5))
+        }
     }
 
     @Test

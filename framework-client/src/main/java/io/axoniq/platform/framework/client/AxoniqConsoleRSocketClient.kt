@@ -36,6 +36,7 @@ import io.rsocket.metadata.WellKnownMimeType
 import io.rsocket.transport.netty.client.TcpClientTransport
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.netty.tcp.TcpClient
 import java.time.Instant
@@ -142,6 +143,21 @@ class AxoniqConsoleRSocketClient(
         return getOrConnectRSocket()
                 .flatMap { socket ->
                     socket.requestResponse(encodingStrategy.encode(payload, createRoutingMetadata(route)))
+                            .map { responsePayload ->
+                                encodingStrategy.decode(responsePayload, responseType)
+                            }
+                }
+    }
+
+    /**
+     * Opens a server-streaming (request-stream) interaction on [route], decoding each emitted payload into
+     * [responseType]. The returned [Flux] establishes the connection on subscribe and completes/errors with the
+     * underlying stream; callers are responsible for resubscribing across reconnects.
+     */
+    fun <R : Any> requestStream(payload: Any, route: String, responseType: Class<R>): Flux<R> {
+        return getOrConnectRSocket()
+                .flatMapMany { socket ->
+                    socket.requestStream(encodingStrategy.encode(payload, createRoutingMetadata(route)))
                             .map { responsePayload ->
                                 encodingStrategy.decode(responsePayload, responseType)
                             }
