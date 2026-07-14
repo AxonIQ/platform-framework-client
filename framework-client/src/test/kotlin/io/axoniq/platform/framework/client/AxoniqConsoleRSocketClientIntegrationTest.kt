@@ -27,6 +27,7 @@ import io.axoniq.platform.framework.api.SetupPayload
 import io.axoniq.platform.framework.api.Versions
 import io.axoniq.platform.framework.client.strategy.CborJackson3EncodingStrategy
 import io.mockk.every
+import io.rsocket.exceptions.ApplicationErrorException
 import io.mockk.mockk
 import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.AfterEach
@@ -169,12 +170,35 @@ class AxoniqConsoleRSocketClientIntegrationTest {
         client.start()
         await().atMost(5, TimeUnit.SECONDS).until { client.isConnected() }
 
-        assertThrows(Exception::class.java) {
+        val exception = assertThrows(ApplicationErrorException::class.java) {
             client
                     .requestStream("request", "unknown.stream.route", ModuleVersion::class.java)
                     .collectList()
                     .block(Duration.ofSeconds(5))
         }
+        assertTrue(exception.message!!.contains("unknown stream route")) {
+            "Expected the server's error message to propagate, but was: ${exception.message}"
+        }
+    }
+
+    @Test
+    fun `requestStream picks up the fresh connection when resubscribed after a reconnect`() {
+        val expected = listOf(ModuleVersion(dependency = "axon-messaging", version = "4.9.0"))
+        mockServer.streamResponses = expected
+
+        client = buildClient()
+        client.start()
+        await().atMost(5, TimeUnit.SECONDS).until { client.isConnected() }
+
+        // Assemble once while connected, so a stale captured socket would surface on resubscription.
+        val stream = client.requestStream("request", MockConsoleServer.STREAM_ROUTE, ModuleVersion::class.java)
+        assertEquals(expected, stream.collectList().block(Duration.ofSeconds(5)))
+
+        mockServer.disconnectClients()
+        await().atMost(5, TimeUnit.SECONDS).until { !client.isConnected() }
+        await().atMost(10, TimeUnit.SECONDS).until { client.isConnected() }
+
+        assertEquals(expected, stream.collectList().block(Duration.ofSeconds(5)))
     }
 
     @Test
