@@ -16,12 +16,15 @@
 
 package io.axoniq.platform.framework.eventprocessor
 
+import io.axoniq.platform.framework.api.AutomatedRetryRequest
+import io.axoniq.platform.framework.api.AutomaticRetryCandidatesResponse
 import io.axoniq.platform.framework.api.DeadLetterProcessRequest
 import io.axoniq.platform.framework.api.DeadLetterRequest
 import io.axoniq.platform.framework.api.DeadLetterResponse
 import io.axoniq.platform.framework.api.DeadLetterSequenceDeleteRequest
 import io.axoniq.platform.framework.api.DeadLetterSequenceSize
 import io.axoniq.platform.framework.api.DeadLetterSingleDeleteRequest
+import io.axoniq.platform.framework.api.DeadLettersForAutomaticRetryRequest
 import io.axoniq.platform.framework.api.DeleteAllDeadLetterSequencesRequest
 import io.axoniq.platform.framework.api.FetchSequenceLettersRequest
 import io.axoniq.platform.framework.api.ProcessAllDeadLetterSequencesRequest
@@ -76,6 +79,16 @@ open class RSocketDlqResponder(
                 Routes.ProcessingGroup.DeadLetter.DELETE_ALL_SEQUENCES,
                 DeleteAllDeadLetterSequencesRequest::class.java,
                 this::handleDeleteAllSequencesCommand,
+        )
+        registrar.registerHandlerWithPayload(
+                Routes.ProcessingGroup.DeadLetter.LETTERS_FOR_AUTOMATIC_RETRY,
+                DeadLettersForAutomaticRetryRequest::class.java,
+                this::handleLettersForAutomaticRetryQuery,
+        )
+        registrar.registerHandlerWithPayload(
+                Routes.ProcessingGroup.DeadLetter.AUTOMATED_RETRY,
+                AutomatedRetryRequest::class.java,
+                this::handleAutomatedRetryCommand,
         )
     }
 
@@ -164,5 +177,20 @@ open class RSocketDlqResponder(
                 request.processingGroup,
         )
         return deadLetterManager.deleteAll(request.processingGroup)
+    }
+
+    private fun handleLettersForAutomaticRetryQuery(
+            request: DeadLettersForAutomaticRetryRequest,
+    ): AutomaticRetryCandidatesResponse {
+        logger.debug("Handling Axoniq Platform LETTERS_FOR_AUTOMATIC_RETRY query [{}]", request)
+        return deadLetterManager.deadLettersForAutomaticRetry(request)
+    }
+
+    private fun handleAutomatedRetryCommand(request: AutomatedRetryRequest): Boolean {
+        logger.debug(
+                "Handling Axoniq Platform AUTOMATED_RETRY command for processing group [{}], message [{}]",
+                request.processingGroup, request.messageIdentifier,
+        )
+        return deadLetterManager.automatedRetry(request.processingGroup, request.messageIdentifier)
     }
 }

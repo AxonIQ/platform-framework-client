@@ -20,9 +20,12 @@ import io.axoniq.framework.messaging.deadletter.Cause
 import io.axoniq.framework.messaging.deadletter.DeadLetter
 import io.axoniq.framework.messaging.deadletter.SequencedDeadLetterProcessor
 import io.axoniq.framework.messaging.deadletter.SequencedDeadLetterQueue
+import io.axoniq.platform.framework.api.AutomaticRetryBackoff
 import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode
+import io.axoniq.platform.framework.api.DeadLettersForAutomaticRetryRequest
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.slot
 import io.mockk.verify
 import org.apache.commons.codec.digest.DigestUtils
 import org.axonframework.common.configuration.Configuration
@@ -37,9 +40,11 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import java.time.Duration
 import java.time.Instant
 import java.util.Optional
 import java.util.concurrent.CompletableFuture
+import java.util.function.UnaryOperator
 
 /**
  * Unit tests for [DeadLetterManager]. Behaviour is grouped under [Nested] inner classes so each
@@ -615,6 +620,168 @@ class DeadLetterManagerTest {
     }
 
     @Nested
+    inner class AutomaticRetry {
+
+        @Test
+        fun `returns only sequences that are due for retry`() {
+            val due = fakeLetter("due")
+            val exhausted = fakeLetter("exhausted", diagnostics = mapOf(PLATFORM_RETRIES_DIAGNOSTIC to "10"))
+            val backingOff = fakeLetter("backing-off", lastTouched = Instant.now())
+            val dlq = fakeDlq(sequences = listOf(listOf(due), listOf(exhausted), listOf(backingOff)))
+            val manager = managerWith(
+                    "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to dlq,
+                    ehc = ehcWithPolicy { event -> event.identifier() },
+            )
+
+            val response = manager.deadLettersForAutomaticRetry(retryRequest(maxRetries = 10))
+
+            assertEquals(listOf("due"), response.candidates.map { it.messageIdentifier })
+            assertEquals(listOf("due"), response.candidates.map { it.sequenceIdentifier })
+            assertEquals(listOf(0), response.candidates.map { it.retries })
+        }
+
+        @Test
+        fun `applies exponential backoff based on recorded retries`() {
+            val twentyFiveMinutesAgo = Instant.now().minus(Duration.ofMinutes(25))
+            val dueAfterTwoRetries = fakeLetter(
+                    "two-retries",
+                    diagnostics = mapOf(PLATFORM_RETRIES_DIAGNOSTIC to "2"),
+                    lastTouched = twentyFiveMinutesAgo,
+            )
+            val waitingAfterThreeRetries = fakeLetter(
+                    "three-retries",
+                    diagnostics = mapOf(PLATFORM_RETRIES_DIAGNOSTIC to "3"),
+                    lastTouched = twentyFiveMinutesAgo,
+            )
+            val dlq = fakeDlq(sequences = listOf(listOf(dueAfterTwoRetries), listOf(waitingAfterThreeRetries)))
+            val manager = managerWith(
+                    "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to dlq,
+                    ehc = ehcWithPolicy { event -> event.identifier() },
+            )
+
+            val response = manager.deadLettersForAutomaticRetry(
+                    retryRequest(backoff = AutomaticRetryBackoff.EXPONENTIAL, backoffMinutes = 5),
+            )
+
+            assertEquals(listOf("two-retries"), response.candidates.map { it.messageIdentifier })
+        }
+
+        @Test
+        fun `caps the number of candidates to the requested limit`() {
+            val sequences = (1..3).map { listOf(fakeLetter("m$it")) }
+            val manager = managerWith(
+                    "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to fakeDlq(sequences = sequences),
+                    ehc = ehcWithPolicy { event -> event.identifier() },
+            )
+
+            val response = manager.deadLettersForAutomaticRetry(retryRequest(limit = 2))
+
+            assertEquals(2, response.candidates.size)
+        }
+
+        @Test
+        fun `fails closed in NONE mode`() {
+            val manager = managerWith(
+                    "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to
+                            fakeDlq(sequences = listOf(listOf(fakeLetter("due")))),
+                    ehc = ehcWithPolicy { event -> event.identifier() },
+                    dlqMode = AxoniqConsoleDlqMode.NONE,
+            )
+
+            val response = manager.deadLettersForAutomaticRetry(retryRequest())
+
+            assertTrue(response.candidates.isEmpty())
+        }
+
+        @Test
+        fun `hashes sequence identifiers in MASKED mode`() {
+            val manager = managerWith(
+                    "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to
+                            fakeDlq(sequences = listOf(listOf(fakeLetter("due")))),
+                    ehc = ehcWithPolicy { event -> event.identifier() },
+                    dlqMode = AxoniqConsoleDlqMode.MASKED,
+            )
+
+            val response = manager.deadLettersForAutomaticRetry(retryRequest())
+
+            assertEquals(listOf(DigestUtils.sha256Hex("due")), response.candidates.map { it.sequenceIdentifier })
+            assertEquals(listOf("due"), response.candidates.map { it.messageIdentifier })
+        }
+
+        @Test
+        fun `successful automated retry leaves the retry counter untouched`() {
+            val head = fakeLetter("m1")
+            val dlq = fakeDlq(sequences = listOf(listOf(head)))
+            val ehc = ehcWithPolicy { event -> event.identifier() }
+            stubProcessResult(ehc, true)
+            val manager = managerWith(
+                    "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to dlq,
+                    ehc = ehc,
+            )
+
+            assertTrue(manager.automatedRetry("orders", "m1"))
+            verify(exactly = 0) {
+                dlq.requeue(any<DeadLetter<EventMessage>>(), any(), any())
+            }
+        }
+
+        @Test
+        fun `failed automated retry increments the platform retry counter on the head letter`() {
+            val head = fakeLetter("m1", diagnostics = mapOf(PLATFORM_RETRIES_DIAGNOSTIC to "2"))
+            val metadataOperator = slot<UnaryOperator<Metadata>>()
+            every { head.withDiagnostics(capture(metadataOperator)) } returns head
+            val dlq = fakeDlq(sequences = listOf(listOf(head)))
+            val letterUpdater = slot<UnaryOperator<DeadLetter<out EventMessage>>>()
+            every { dlq.requeue(head, capture(letterUpdater), null) } returns
+                    CompletableFuture.completedFuture(null)
+            val ehc = ehcWithPolicy { event -> event.identifier() }
+            stubProcessResult(ehc, false)
+            val manager = managerWith(
+                    "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to dlq,
+                    ehc = ehc,
+            )
+
+            assertFalse(manager.automatedRetry("orders", "m1"))
+
+            verify(exactly = 1) { dlq.requeue(head, any(), null) }
+            letterUpdater.captured.apply(head)
+            val updated = metadataOperator.captured.apply(head.diagnostics())
+            assertEquals("3", updated[PLATFORM_RETRIES_DIAGNOSTIC])
+        }
+
+        @Test
+        fun `failed automated retry skips the counter when the letter is no longer a sequence head`() {
+            val dlq = fakeDlq(sequences = emptyList())
+            val ehc = ehcWithPolicy { event -> event.identifier() }
+            stubProcessResult(ehc, false)
+            val manager = managerWith(
+                    "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to dlq,
+                    ehc = ehc,
+            )
+
+            assertFalse(manager.automatedRetry("orders", "gone"))
+            verify(exactly = 0) {
+                dlq.requeue(any<DeadLetter<EventMessage>>(), any(), any())
+            }
+        }
+
+        private fun retryRequest(
+                processingGroup: String = "orders",
+                backoff: AutomaticRetryBackoff = AutomaticRetryBackoff.CONSISTENT,
+                backoffMinutes: Int = 5,
+                maxRetries: Int = 10,
+                limit: Int = 50,
+        ) = DeadLettersForAutomaticRetryRequest(processingGroup, backoff, backoffMinutes, maxRetries, limit)
+
+        @Suppress("UNCHECKED_CAST")
+        private fun stubProcessResult(ehc: EventHandlingComponent, result: Boolean) {
+            every {
+                (ehc as SequencedDeadLetterProcessor<EventMessage>).process(any())
+            } returns CompletableFuture.completedFuture(result)
+        }
+    }
+
+    @Nested
     inner class Errors {
 
         @Test
@@ -731,6 +898,9 @@ class DeadLetterManagerTest {
         every { dlq.size(null) } returns CompletableFuture.completedFuture(totalSize)
         every { dlq.clear(null) } returns CompletableFuture.completedFuture(null)
         every { dlq.evict(any<DeadLetter<EventMessage>>(), null) } returns CompletableFuture.completedFuture(null)
+        every {
+            dlq.requeue(any<DeadLetter<EventMessage>>(), any(), null)
+        } returns CompletableFuture.completedFuture(null)
         return dlq
     }
 
@@ -741,9 +911,10 @@ class DeadLetterManagerTest {
             causeType: String? = "java.lang.RuntimeException",
             causeMessage: String? = "boom",
             diagnostics: Map<String, String> = emptyMap(),
+            lastTouched: Instant = Instant.EPOCH,
     ): DeadLetter<EventMessage> {
         val message = fakeEventMessage(messageId, payload, payloadType)
-        return fakeLetterFromMessage(message, causeType, causeMessage, diagnostics)
+        return fakeLetterFromMessage(message, causeType, causeMessage, diagnostics, lastTouched)
     }
 
     private fun fakeLetterFromMessage(
@@ -751,6 +922,7 @@ class DeadLetterManagerTest {
             causeType: String? = "java.lang.RuntimeException",
             causeMessage: String? = "boom",
             diagnostics: Map<String, String> = emptyMap(),
+            lastTouched: Instant = Instant.EPOCH,
     ): DeadLetter<EventMessage> {
         val letter = mockk<DeadLetter<EventMessage>>(relaxed = true)
         every { letter.message() } returns message
@@ -762,7 +934,7 @@ class DeadLetterManagerTest {
         }
         every { letter.cause() } returns cause
         every { letter.enqueuedAt() } returns Instant.EPOCH
-        every { letter.lastTouched() } returns Instant.EPOCH
+        every { letter.lastTouched() } returns lastTouched
         every { letter.diagnostics() } returns
                 if (diagnostics.isEmpty()) Metadata.emptyInstance() else Metadata.from(diagnostics)
         return letter

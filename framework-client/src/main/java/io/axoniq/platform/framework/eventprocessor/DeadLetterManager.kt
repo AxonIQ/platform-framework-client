@@ -19,8 +19,12 @@ package io.axoniq.platform.framework.eventprocessor
 import io.axoniq.framework.messaging.deadletter.DeadLetter
 import io.axoniq.framework.messaging.deadletter.SequencedDeadLetterProcessor
 import io.axoniq.framework.messaging.deadletter.SequencedDeadLetterQueue
+import io.axoniq.platform.framework.api.AutomaticRetryBackoff
+import io.axoniq.platform.framework.api.AutomaticRetryCandidate
+import io.axoniq.platform.framework.api.AutomaticRetryCandidatesResponse
 import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode
 import io.axoniq.platform.framework.api.DeadLetterResponse
+import io.axoniq.platform.framework.api.DeadLettersForAutomaticRetryRequest
 import io.axoniq.platform.framework.api.SequenceLettersResponse
 import org.apache.commons.codec.digest.DigestUtils
 import org.axonframework.common.configuration.Configuration
@@ -32,6 +36,8 @@ import org.axonframework.messaging.core.unitofwork.UnitOfWorkFactory
 import org.axonframework.messaging.eventhandling.EventHandlingComponent
 import org.axonframework.messaging.eventhandling.EventMessage
 import org.slf4j.LoggerFactory
+import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import io.axoniq.platform.framework.api.DeadLetter as ApiDeadLetter
@@ -39,6 +45,16 @@ import io.axoniq.platform.framework.api.DeadLetter as ApiDeadLetter
 private const val LETTER_PAYLOAD_SIZE_LIMIT = 1024
 private const val MASKED = "<MASKED>"
 private const val LIMITED = "<LIMITED>"
+
+/**
+ * Diagnostic key counting failed platform-driven (automated) retry attempts on a head letter.
+ * Deliberately prefixed so it can't collide with user-maintained diagnostics such as the `retries`
+ * example from the reference guide; manual retries never touch it.
+ */
+const val PLATFORM_RETRIES_DIAGNOSTIC = "__platform_retries"
+
+/** Caps the exponential backoff shift so `backoffMinutes shl retries` cannot overflow. */
+private const val MAX_EXPONENTIAL_SHIFT = 20
 private val logger = LoggerFactory.getLogger(DeadLetterManager::class.java)
 
 /**
@@ -311,6 +327,101 @@ class DeadLetterManager @JvmOverloads constructor(
             processed++
         }
         return processed
+    }
+
+    /**
+     * Returns the sequences of the DLQ that are due for a platform-driven automatic retry,
+     * filtered client-side so exhausted or still-backing-off sequences never leave the
+     * application. A sequence is due when its head letter has fewer than
+     * [DeadLettersForAutomaticRetryRequest.maxRetries] recorded automated attempts (the
+     * [PLATFORM_RETRIES_DIAGNOSTIC] diagnostic) and its `lastTouched` is at least the computed
+     * backoff ago.
+     *
+     * Only identifiers ever cross the wire, so this works in every [dlqMode] except
+     * [AxoniqConsoleDlqMode.NONE]: sequence identifiers can carry domain meaning (e.g. an
+     * aggregate id), and NONE's contract is that nothing but counts is exposed — so it fails
+     * closed with an empty result. In MASKED mode the sequence identifier is hashed, consistent
+     * with the other queries.
+     */
+    fun deadLettersForAutomaticRetry(request: DeadLettersForAutomaticRetryRequest): AutomaticRetryCandidatesResponse {
+        val entry = dlqFor(request.processingGroup)
+        if (dlqMode == AxoniqConsoleDlqMode.NONE) {
+            return AutomaticRetryCandidatesResponse(emptyList())
+        }
+        val now = Instant.now()
+        val candidates = entry.dlq.deadLetters(null).join()
+                .asSequence()
+                .mapNotNull { it.firstOrNull() }
+                .map { head -> head to head.platformRetries() }
+                .filter { (_, retries) -> retries < request.maxRetries }
+                .filter { (head, retries) -> !head.lastTouched().plus(request.backoffFor(retries)).isAfter(now) }
+                .take(request.limit.coerceAtLeast(0))
+                .map { (head, retries) ->
+                    val rawId = sequenceIdentifierFor(entry, head)
+                    AutomaticRetryCandidate(
+                            sequenceIdentifier = if (dlqMode == AxoniqConsoleDlqMode.MASKED) rawId.hashed() else rawId,
+                            messageIdentifier = head.message().identifier(),
+                            retries = retries,
+                            lastTouched = head.lastTouched(),
+                    )
+                }
+                .toList()
+        return AutomaticRetryCandidatesResponse(candidates)
+    }
+
+    /**
+     * Processes the sequence whose head letter matches [messageIdentifier] as an automated
+     * (platform-driven) retry. Behaves like [process], except that a failed attempt increments the
+     * head letter's [PLATFORM_RETRIES_DIAGNOSTIC] diagnostic — manual retries deliberately leave
+     * that counter untouched so operator actions don't consume the automated retry budget.
+     *
+     * The counter is bumped after the framework has requeued the failed letter (rather than by
+     * decorating the enqueue policy) so a custom user [io.axoniq.framework.messaging.deadletter.EnqueuePolicy]
+     * that rewrites diagnostics wholesale can't wipe it. Attempts are counted per head letter: when
+     * a retry round processes some letters before failing on a later one, the new head starts with
+     * a fresh counter — the sequence made progress, so it earned a fresh budget.
+     */
+    fun automatedRetry(processingGroup: String, messageIdentifier: String): Boolean {
+        val entry = dlqFor(processingGroup)
+        val success = entry.processor.process { it.message().identifier() == messageIdentifier }
+                .get(60, TimeUnit.SECONDS)
+        if (!success) {
+            registerFailedAutomatedAttempt(entry, messageIdentifier)
+        }
+        return success
+    }
+
+    private fun registerFailedAutomatedAttempt(entry: DlqEntry, messageIdentifier: String) {
+        val head = entry.dlq.deadLetters(null).join()
+                .asSequence()
+                .mapNotNull { it.firstOrNull() }
+                .firstOrNull { it.message().identifier() == messageIdentifier }
+        if (head == null) {
+            logger.warn(
+                    "Automated retry of message [{}] in [{}] failed, but the letter is no longer the head of a " +
+                            "sequence — skipping the retry-counter update.",
+                    messageIdentifier, entry.processingGroup,
+            )
+            return
+        }
+        val next = (head.platformRetries() + 1).toString()
+        entry.dlq.requeue(
+                head,
+                { letter -> letter.withDiagnostics { it.and(PLATFORM_RETRIES_DIAGNOSTIC, next) } },
+                null,
+        ).join()
+    }
+
+    private fun DeadLetter<out EventMessage>.platformRetries(): Int =
+            diagnostics()[PLATFORM_RETRIES_DIAGNOSTIC]?.toIntOrNull() ?: 0
+
+    private fun DeadLettersForAutomaticRetryRequest.backoffFor(retries: Int): Duration {
+        val minutes = when (backoff) {
+            AutomaticRetryBackoff.CONSISTENT -> backoffMinutes.toLong()
+            AutomaticRetryBackoff.EXPONENTIAL ->
+                backoffMinutes.toLong() shl retries.coerceAtMost(MAX_EXPONENTIAL_SHIFT)
+        }
+        return Duration.ofMinutes(minutes)
     }
 
     fun deleteAll(processingGroup: String, timeoutSeconds: Long = 600): Int {
