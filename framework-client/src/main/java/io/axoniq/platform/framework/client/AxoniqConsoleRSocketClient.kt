@@ -36,6 +36,7 @@ import io.rsocket.metadata.WellKnownMimeType
 import io.rsocket.transport.netty.client.TcpClientTransport
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.netty.tcp.TcpClient
 import java.time.Instant
@@ -128,7 +129,7 @@ class AxoniqConsoleRSocketClient(
      * Do not use this method for reports, as it does not check if reports are paused. Use [sendReport] instead.
      */
     fun sendMessage(payload: Any, route: String): Mono<Unit> {
-        return getOrConnectRSocket()
+        return Mono.defer { getOrConnectRSocket() }
                 .flatMap { socket ->
                     socket.requestResponse(encodingStrategy.encode(payload, createRoutingMetadata(route)))
                             .map {
@@ -139,9 +140,26 @@ class AxoniqConsoleRSocketClient(
     }
 
     fun <R : Any> retrieve(payload: Any, route: String, responseType: Class<R>): Mono<R> {
-        return getOrConnectRSocket()
+        return Mono.defer { getOrConnectRSocket() }
                 .flatMap { socket ->
                     socket.requestResponse(encodingStrategy.encode(payload, createRoutingMetadata(route)))
+                            .map { responsePayload ->
+                                encodingStrategy.decode(responsePayload, responseType)
+                            }
+                }
+    }
+
+    /**
+     * Opens a server-streaming (request-stream) interaction on [route], decoding each emitted payload into
+     * [responseType]. The returned [Flux] resolves the connection on each subscription and completes/errors
+     * with the underlying stream, so resubscribing after a disconnect picks up the fresh connection once it is
+     * re-established. Callers are responsible for resubscribing across reconnects; prefer [Flux.retryWhen] with
+     * a backoff over a bare [Flux.retry], which would drive reconnect attempts without any delay.
+     */
+    fun <R : Any> requestStream(payload: Any, route: String, responseType: Class<R>): Flux<R> {
+        return Mono.defer { getOrConnectRSocket() }
+                .flatMapMany { socket ->
+                    socket.requestStream(encodingStrategy.encode(payload, createRoutingMetadata(route)))
                             .map { responsePayload ->
                                 encodingStrategy.decode(responsePayload, responseType)
                             }
