@@ -40,6 +40,7 @@ import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import io.axoniq.platform.framework.api.DeadLetter as ApiDeadLetter
 
 private const val LETTER_PAYLOAD_SIZE_LIMIT = 1024
@@ -383,8 +384,18 @@ class DeadLetterManager @JvmOverloads constructor(
      */
     fun automatedRetry(processingGroup: String, messageIdentifier: String): Boolean {
         val entry = dlqFor(processingGroup)
-        val success = entry.processor.process { it.message().identifier() == messageIdentifier }
-                .get(60, TimeUnit.SECONDS)
+        val success = try {
+            entry.processor.process { it.message().identifier() == messageIdentifier }
+                    .get(60, TimeUnit.SECONDS)
+        } catch (e: TimeoutException) {
+            // A sequence that fails by being slow must still consume its retry budget — otherwise
+            // it is retried every round forever without ever counting toward maxRetries.
+            logger.warn(
+                    "Automated retry of message [{}] in [{}] timed out — counting it as a failed attempt.",
+                    messageIdentifier, entry.processingGroup,
+            )
+            false
+        }
         if (!success) {
             registerFailedAutomatedAttempt(entry, messageIdentifier)
         }

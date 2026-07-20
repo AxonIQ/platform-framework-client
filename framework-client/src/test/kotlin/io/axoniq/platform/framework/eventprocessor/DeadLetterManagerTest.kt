@@ -44,6 +44,7 @@ import java.time.Duration
 import java.time.Instant
 import java.util.Optional
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeoutException
 import java.util.function.UnaryOperator
 
 /**
@@ -750,6 +751,30 @@ class DeadLetterManagerTest {
         }
 
         @Test
+        fun `timed-out automated retry counts as a failed attempt`() {
+            val head = fakeLetter("m1", diagnostics = mapOf(PLATFORM_RETRIES_DIAGNOSTIC to "2"))
+            val metadataOperator = slot<UnaryOperator<Metadata>>()
+            every { head.withDiagnostics(capture(metadataOperator)) } returns head
+            val dlq = fakeDlq(sequences = listOf(listOf(head)))
+            val letterUpdater = slot<UnaryOperator<DeadLetter<out EventMessage>>>()
+            every { dlq.requeue(head, capture(letterUpdater), null) } returns
+                    CompletableFuture.completedFuture(null)
+            val ehc = ehcWithPolicy { event -> event.identifier() }
+            stubProcessTimeout(ehc)
+            val manager = managerWith(
+                    "DeadLetterQueue[EventHandlingComponent[orders][OrderProjector]]" to dlq,
+                    ehc = ehc,
+            )
+
+            assertFalse(manager.automatedRetry("orders", "m1"))
+
+            verify(exactly = 1) { dlq.requeue(head, any(), null) }
+            letterUpdater.captured.apply(head)
+            val updated = metadataOperator.captured.apply(head.diagnostics())
+            assertEquals("3", updated[PLATFORM_RETRIES_DIAGNOSTIC])
+        }
+
+        @Test
         fun `failed automated retry skips the counter when the letter is no longer a sequence head`() {
             val dlq = fakeDlq(sequences = emptyList())
             val ehc = ehcWithPolicy { event -> event.identifier() }
@@ -778,6 +803,16 @@ class DeadLetterManagerTest {
             every {
                 (ehc as SequencedDeadLetterProcessor<EventMessage>).process(any())
             } returns CompletableFuture.completedFuture(result)
+        }
+
+        @Suppress("UNCHECKED_CAST")
+        private fun stubProcessTimeout(ehc: EventHandlingComponent) {
+            val slowProcessing = mockk<CompletableFuture<Boolean>> {
+                every { get(any<Long>(), any()) } throws TimeoutException()
+            }
+            every {
+                (ehc as SequencedDeadLetterProcessor<EventMessage>).process(any())
+            } returns slowProcessing
         }
     }
 
