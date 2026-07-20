@@ -30,6 +30,7 @@ import io.rsocket.metadata.WellKnownMimeType
 import io.rsocket.transport.netty.server.CloseableChannel
 import io.rsocket.transport.netty.server.TcpServerTransport
 import io.rsocket.util.DefaultPayload
+import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import java.net.InetSocketAddress
 import java.util.concurrent.Executors
@@ -48,6 +49,11 @@ import java.util.concurrent.TimeUnit
  */
 class MockConsoleServer {
 
+    companion object {
+        /** Route the mock server answers request-stream interactions on. */
+        const val STREAM_ROUTE = "test.stream"
+    }
+
     private val mapper = CBORMapper.builder().build()
     private var server: CloseableChannel? = null
 
@@ -58,6 +64,12 @@ class MockConsoleServer {
 
     /** When true the server rejects the setup with "Access Denied". */
     var rejectSetup = false
+
+    /**
+     * Payloads emitted, in order, for a request-stream on [STREAM_ROUTE]. Each element is CBOR-encoded and sent as
+     * a separate stream payload; the stream then completes.
+     */
+    var streamResponses: List<Any> = emptyList()
 
     /** Settings returned on every SETTINGS_V2 request. */
     var clientSettings: ClientSettingsV2 = ClientSettingsV2(
@@ -80,6 +92,7 @@ class MockConsoleServer {
             startSendingHeartbeats()
             Mono.just(object : RSocket {
                 override fun requestResponse(payload: Payload): Mono<Payload> = handleRequest(payload)
+                override fun requestStream(payload: Payload): Flux<Payload> = handleStream(payload)
             })
         }
             .bind(TcpServerTransport.create("0.0.0.0", 0))
@@ -124,6 +137,14 @@ class MockConsoleServer {
             Routes.Management.SETTINGS_V2 -> Mono.just(encodeResponse(clientSettings))
             Routes.Management.HEARTBEAT -> Mono.just(encodeResponse(""))
             else -> Mono.error(IllegalArgumentException("MockConsoleServer: unknown route '$route'"))
+        }
+    }
+
+    private fun handleStream(payload: Payload): Flux<Payload> {
+        val route = extractRoute(payload)
+        return when (route) {
+            STREAM_ROUTE -> Flux.fromIterable(streamResponses).map { encodeResponse(it) }
+            else -> Flux.error(IllegalArgumentException("MockConsoleServer: unknown stream route '$route'"))
         }
     }
 
