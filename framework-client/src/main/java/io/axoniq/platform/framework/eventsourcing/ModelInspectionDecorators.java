@@ -142,12 +142,17 @@ final class ModelInspectionDecorators {
         if (metamodel == null) {
             return delegate;
         }
+        // CriteriaResolver is registered only by event-sourced entity modules — state-based
+        // entities register an EntityMetamodel too, so the metamodel alone isn't enough.
+        CriteriaResolver criteriaResolver = config.getOptionalComponent(CriteriaResolver.class, name).orElse(null);
+        if (criteriaResolver == null) {
+            return delegate;
+        }
         try {
             Class idType = delegate.idType();
             Class entityType = delegate.entityType();
 
             EventStore eventStore = config.getComponent(EventStore.class);
-            CriteriaResolver criteriaResolver = config.getComponent(CriteriaResolver.class, name);
             EventSourcedEntityFactory entityFactory = config.getComponent(EventSourcedEntityFactory.class, name);
             SnapshotPolicy snapshotPolicy = config.getOptionalComponent(SnapshotPolicy.class, name).orElse(null);
 
