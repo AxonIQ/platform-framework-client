@@ -96,3 +96,61 @@ data class SequenceLettersResponse(
     val letters: List<DeadLetter>,
     val totalCount: Long = letters.size.toLong(),
 )
+
+/**
+ * Requests the sequences of a DLQ that are due for a platform-driven automatic retry. The platform
+ * owns the retry settings (they live on the event-processor configuration) and passes them along;
+ * the client filters locally so exhausted or still-backing-off sequences never leave the
+ * application.
+ *
+ * A sequence is due when its head letter has fewer than [maxRetries] recorded automated attempts
+ * (the `__platform_retries` diagnostic) and its `lastTouched` is at least the computed backoff ago.
+ *
+ * @param processingGroup The processing group / DLQ identifier.
+ * @param backoff         The backoff algorithm to apply between attempts.
+ * @param backoffMinutes  Base wait in minutes between attempts.
+ * @param maxRetries      Maximum number of automated attempts per head letter.
+ * @param limit           Maximum number of candidates to return.
+ */
+data class DeadLettersForAutomaticRetryRequest(
+    val processingGroup: String,
+    val backoff: AutomaticRetryBackoff,
+    val backoffMinutes: Int,
+    val maxRetries: Int,
+    val limit: Int,
+)
+
+enum class AutomaticRetryBackoff {
+    /** Fixed wait of `backoffMinutes` between every attempt. */
+    CONSISTENT,
+
+    /** Wait doubles each attempt: `backoffMinutes * 2^retries`. */
+    EXPONENTIAL,
+}
+
+data class AutomaticRetryCandidatesResponse(
+    val candidates: List<AutomaticRetryCandidate>,
+)
+
+/**
+ * A sequence head that is due for an automated retry. Carries identifiers only — no payload,
+ * cause, or diagnostics — so the platform can trigger the retry without the letter contents ever
+ * leaving the application.
+ */
+data class AutomaticRetryCandidate(
+    val sequenceIdentifier: String,
+    val messageIdentifier: String,
+    val retries: Int,
+    val lastTouched: Instant,
+)
+
+/**
+ * Processes the dead-letter sequence whose head letter matches [messageIdentifier], as an
+ * automated (platform-driven) retry. Unlike the manual [DeadLetterProcessRequest], a failed
+ * attempt increments the head letter's `__platform_retries` diagnostic so it counts against the
+ * configured max-retry budget.
+ */
+data class AutomatedRetryRequest(
+    val processingGroup: String,
+    val messageIdentifier: String,
+)

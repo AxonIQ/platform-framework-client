@@ -66,6 +66,13 @@ object Routes {
             const val DELETE_LETTER = "dlq-command-delete-letter"
             const val PROCESS = "dlq-command-process"
             const val PROCESS_ALL_SEQUENCES = "dlq-command-process-all-sequences"
+
+            // Platform-driven automatic DLQ retries — added in 5.1.2. LETTERS_FOR_AUTOMATIC_RETRY
+            // filters due sequences client-side; AUTOMATED_RETRY processes one sequence and, unlike
+            // PROCESS (the manual UI action), counts failed attempts in the __platform_retries
+            // diagnostic so the platform's max-retry budget only tracks automated attempts.
+            const val LETTERS_FOR_AUTOMATIC_RETRY = "dlq-query-dead-letters-for-automatic-retry"
+            const val AUTOMATED_RETRY = "dlq-command-automated-retry"
         }
     }
 
