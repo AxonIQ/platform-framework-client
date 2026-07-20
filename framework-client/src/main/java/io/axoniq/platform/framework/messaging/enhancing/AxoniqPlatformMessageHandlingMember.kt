@@ -40,11 +40,6 @@ open class AxoniqPlatformMessageHandlingMember<T: Any>(open val delegate: Messag
         return delegate.canHandleMessageType(messageType)
     }
 
-    @Suppress("DEPRECATION")
-    override fun handleSync(message: Message, context: ProcessingContext, target: T?): Any {
-        return delegate.handleSync(message, context, target)
-    }
-
     override fun handle(message: Message, context: ProcessingContext, target: T?): MessageStream<*> {
         HandlerMeasurement.onContext(context) {
             logger.debug { "Received message [${message.type()}] for class [$declaringClassName]" }

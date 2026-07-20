@@ -61,7 +61,7 @@ class AxoniqPlatformEventStore(private val delegate: EventStore, private val ent
         return delegate.tokenAt(at, context)
     }
 
-    override fun subscribe(eventsBatchConsumer: BiFunction<List<out EventMessage>, ProcessingContext, CompletableFuture<*>>): Registration {
+    override fun subscribe(eventsBatchConsumer: BiFunction<List<out EventMessage>, ProcessingContext?, CompletableFuture<*>>): Registration {
         return delegate.subscribe(eventsBatchConsumer)
     }
 
