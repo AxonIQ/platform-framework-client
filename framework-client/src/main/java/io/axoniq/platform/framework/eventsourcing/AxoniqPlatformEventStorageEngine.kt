@@ -84,8 +84,8 @@ class AxoniqPlatformEventStorageEngine(
         return appendEvents(condition, context, events.toList())
     }
 
-    override fun source(condition: SourcingCondition): MessageStream<EventMessage> {
-        return delegate.source(condition)
+    override fun source(condition: SourcingCondition, context: ProcessingContext?): MessageStream<EventMessage> {
+        return delegate.source(condition, context)
     }
 
     override fun stream(condition: StreamingCondition): MessageStream<EventMessage> {
