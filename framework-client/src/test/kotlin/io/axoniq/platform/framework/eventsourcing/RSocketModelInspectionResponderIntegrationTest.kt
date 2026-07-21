@@ -329,21 +329,28 @@ class RSocketModelInspectionResponderIntegrationTest {
             eventCount++
         }
     }
-
-    data class ReservationCreated(
-            @field:EventTag(key = "reservationId") val reservationId: String,
-            val customerId: String,
-    )
-
-    data class ReservationConfirmed(
-            @field:EventTag(key = "reservationId") val reservationId: String,
-    )
-
-    data class ReservationCancelled(
-            @field:EventTag(key = "reservationId") val reservationId: String,
-            val reason: String,
-    )
 }
+
+// Events are declared top-level (not nested in the test class) on purpose: AF5's MessageType
+// derives a QualifiedName as `<package>.<simpleName>`, dropping any enclosing class. Nesting these
+// would make `message.type().name()` report `...eventsourcing.ReservationCreated` while
+// `ReservationCreated::class.java.name` reports `...IntegrationTest$ReservationCreated`, so the
+// payloadType assertions would never match. Top-level events mirror real applications and keep the
+// two names equal.
+
+data class ReservationCreated(
+        @field:EventTag(key = "reservationId") val reservationId: String,
+        val customerId: String,
+)
+
+data class ReservationConfirmed(
+        @field:EventTag(key = "reservationId") val reservationId: String,
+)
+
+data class ReservationCancelled(
+        @field:EventTag(key = "reservationId") val reservationId: String,
+        val reason: String,
+)
 
 /**
  * Stamps out a stock test [AxoniqPlatformConfiguration] with the given access mode. The
