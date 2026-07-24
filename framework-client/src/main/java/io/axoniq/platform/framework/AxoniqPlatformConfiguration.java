@@ -27,6 +27,8 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Builder class to instantiate a {@link AxoniqPlatformConfigurerEnhancer}.
@@ -44,7 +46,10 @@ public class AxoniqPlatformConfiguration {
     private Long initialDelay = 0L;
 
     private ScheduledExecutorService reportingTaskExecutor;
+    private boolean reportingTaskExecutorProvided = false;
     private Integer reportingThreadPoolSize = 2;
+
+    private static final AtomicInteger REPORTING_THREAD_NUMBER = new AtomicInteger(1);
 
     private DomainEventAccessMode domainEventAccessMode = DomainEventAccessMode.NONE;
 
@@ -142,8 +147,9 @@ public class AxoniqPlatformConfiguration {
      * @return The builder for fluent interfacing
      */
     public AxoniqPlatformConfiguration reportingTaskExecutor(ScheduledExecutorService executorService) {
-        BuilderUtils.assertNonNull(reportingTaskExecutor, "Axoniq Platform reportingTaskExecutor must be non-null");
+        BuilderUtils.assertNonNull(executorService, "Axoniq Platform reportingTaskExecutor must be non-null");
         this.reportingTaskExecutor = executorService;
+        this.reportingTaskExecutorProvided = true;
         return this;
     }
 
@@ -175,9 +181,23 @@ public class AxoniqPlatformConfiguration {
 
     public ScheduledExecutorService getReportingTaskExecutor() {
         if (reportingTaskExecutor == null) {
-            reportingTaskExecutor = Executors.newScheduledThreadPool(reportingThreadPoolSize);
+            reportingTaskExecutor = Executors.newScheduledThreadPool(reportingThreadPoolSize, reportingThreadFactory());
         }
         return reportingTaskExecutor;
+    }
+
+    public void shutdownReportingTaskExecutor() {
+        if (reportingTaskExecutor != null && !reportingTaskExecutorProvided) {
+            reportingTaskExecutor.shutdownNow();
+        }
+    }
+
+    private static ThreadFactory reportingThreadFactory() {
+        return runnable -> {
+            Thread thread = new Thread(runnable, "axoniq-platform-reporting-" + REPORTING_THREAD_NUMBER.getAndIncrement());
+            thread.setDaemon(true);
+            return thread;
+        };
     }
 
     public String getEnvironmentId() {

@@ -325,6 +325,7 @@ class AxoniqConsoleRSocketClient(
         disposeCurrentConnection()
         maintenanceTask?.cancel(true)
         maintenanceTask = null
+        properties.shutdownReportingTaskExecutor()
     }
 
     companion object {
