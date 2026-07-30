@@ -115,7 +115,8 @@ public class AxoniqPlatformConfigurerEnhancer implements ConfigurationEnhancer {
                                                    c.getComponent(PlatformClientConnectionService.class),
                                                    determineInstanceName(c)))
 
-                                           .onStart(Phase.EXTERNAL_CONNECTIONS, AxoniqConsoleRSocketClient::start))
+                                           .onStart(Phase.INSTRUCTION_COMPONENTS, AxoniqConsoleRSocketClient::start)
+                                           .onShutdown(Phase.INSTRUCTION_COMPONENTS, AxoniqConsoleRSocketClient::disposeClient))
                 .registerComponent(ComponentDefinition
                                            .ofType(ServerProcessorReporter.class)
                                            .withBuilder(c -> new ServerProcessorReporter(
