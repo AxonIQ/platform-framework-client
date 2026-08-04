@@ -24,12 +24,6 @@ import org.axonframework.modelling.repository.ManagedEntity
 import org.axonframework.modelling.repository.Repository
 import java.util.concurrent.CompletableFuture
 
-/**
- * [DescribableComponent] is implemented explicitly rather than inherited: since AF5.3-SNAPSHOT
- * `StateManager` extends it, but the currently targeted 5.3.0-RC1 does not. Declaring it here keeps
- * [describeTo] a valid `override` against both, so the nightly compatibility build against the
- * rolling snapshot stays green without breaking the pinned build.
- */
 class AxoniqPlatformStateManager(
         private val delegate: StateManager,
         private val entityMetricsRegistry: EntityMetricsRegistry,
