@@ -16,6 +16,8 @@
 
 package io.axoniq.platform.framework.modelling
 
+import org.axonframework.common.infra.ComponentDescriptor
+import org.axonframework.common.infra.DescribableComponent
 import org.axonframework.messaging.core.unitofwork.ProcessingContext
 import org.axonframework.modelling.StateManager
 import org.axonframework.modelling.repository.ManagedEntity
@@ -25,7 +27,7 @@ import java.util.concurrent.CompletableFuture
 class AxoniqPlatformStateManager(
         private val delegate: StateManager,
         private val entityMetricsRegistry: EntityMetricsRegistry,
-): StateManager {
+): StateManager, DescribableComponent {
     override fun <ID: Any, T: Any> register(repository: Repository<ID, T>): StateManager {
         if(repository is AxoniqPlatformRepository<ID, T>) {
             delegate.register<ID, T>(repository)
@@ -49,6 +51,10 @@ class AxoniqPlatformStateManager(
 
     override fun <ID : Any, T : Any> repository(entityType: Class<T>, idType: Class<ID>): Repository<ID, T> {
         return delegate.repository(entityType, idType)
+    }
+
+    override fun describeTo(descriptor: ComponentDescriptor) {
+        descriptor.describeWrapperOf(delegate)
     }
 
 }
