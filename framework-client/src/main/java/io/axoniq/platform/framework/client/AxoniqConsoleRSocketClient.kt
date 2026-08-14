@@ -29,6 +29,7 @@ import io.axoniq.platform.framework.api.ClientStatusUpdate
 import io.axoniq.platform.framework.client.strategy.RSocketPayloadEncodingStrategy
 import io.netty.buffer.ByteBufAllocator
 import io.netty.buffer.CompositeByteBuf
+import io.netty.resolver.DefaultAddressResolverGroup
 import io.rsocket.Payload
 import io.rsocket.RSocket
 import io.rsocket.core.RSocketConnector
@@ -299,7 +300,13 @@ class AxoniqConsoleRSocketClient(
             TcpClientTransport.create(tcpClient())
 
     private fun tcpClient(): TcpClient {
+        // Use the JDK's blocking resolver instead of Netty's async DNS resolver. The client
+        // maintains a single long-lived connection, so async DNS gains nothing, while Netty's
+        // resolver requires the platform-specific netty-resolver-dns-native-macos artifact on
+        // macOS and otherwise falls back to parsing /etc/resolv.conf, which can stall connection
+        // attempts for multiple seconds on misconfigured or VPN-altered systems.
         val client = TcpClient.create()
+                .resolver(DefaultAddressResolverGroup.INSTANCE)
                 .host(host)
                 .port(port)
                 .doOnDisconnected {
