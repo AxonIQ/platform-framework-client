@@ -49,7 +49,7 @@ class AxoniqPlatformStateManager(
         return delegate.registeredIdsFor(entityType)
     }
 
-    override fun <ID : Any, T : Any> repository(entityType: Class<T>, idType: Class<ID>): Repository<ID, T> {
+    override fun <ID : Any, T : Any> repository(entityType: Class<T>, idType: Class<ID>): Repository<ID, T>? {
         return delegate.repository(entityType, idType)
     }
 
