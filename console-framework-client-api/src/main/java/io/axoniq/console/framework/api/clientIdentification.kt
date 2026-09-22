@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025. AxonIQ B.V.
+ * Copyright (c) 2022-2026. AxonIQ B.V.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -92,6 +92,45 @@ data class SetupPayload(
         val versions: Versions,
         val upcasters: List<String>,
         val features: SupportedFeatures = SupportedFeatures(),
+        val runtime: RuntimeInformation? = null,
+)
+
+/**
+ * What the application is running on. Sent once, at setup, to give the reported metrics a denominator:
+ * a CPU or heap figure means little without knowing how much of either the process was allowed.
+ *
+ * Every field is optional — an older client sends none of them, and a platform that cannot answer a
+ * particular question leaves that one null rather than guessing.
+ */
+data class RuntimeInformation(
+        /* The JVM itself, e.g. "OpenJDK 64-Bit Server VM" by "Eclipse Adoptium" at "21.0.10+7". */
+        val jvmName: String? = null,
+        val jvmVendor: String? = null,
+        val jvmVersion: String? = null,
+        /* The Java release, e.g. "21.0.10", and the fuller runtime build it came from. */
+        val javaVersion: String? = null,
+        val javaRuntimeVersion: String? = null,
+        val osName: String? = null,
+        val osVersion: String? = null,
+        val osArch: String? = null,
+        /* Processors the runtime can see. Under a fractional CPU limit this is rounded up, and so is
+         * larger than what the container may actually use — see [cpuQuotaInCores]. */
+        val availableProcessors: Int? = null,
+        /* -Xmx, in bytes, or null when the heap is unbounded. */
+        val maxHeapInBytes: Long? = null,
+        val garbageCollectors: List<String>? = null,
+        /* When the JVM started, in epoch milliseconds. */
+        val startedAt: Long? = null,
+        /* The control group hierarchy in use, 1 or 2, or null when the process is not in one. */
+        val cgroupVersion: Int? = null,
+        /* The CPU bandwidth limit in cores — Kubernetes' `limits.cpu`, where `200m` reads 0.2. Null when
+         * no limit is enforced, in which case the process may use [availableProcessors]. */
+        val cpuQuotaInCores: Double? = null,
+        /* The raw relative weight behind Kubernetes' `requests.cpu`. Its scale differs between cgroup v1
+         * and v2, so it is reported unconverted; read it together with [cgroupVersion]. */
+        val cpuShares: Long? = null,
+        /* Kubernetes' `limits.memory`, in bytes, or null when no limit is enforced. */
+        val memoryLimitInBytes: Long? = null,
 )
 
 data class SupportedFeatures(
