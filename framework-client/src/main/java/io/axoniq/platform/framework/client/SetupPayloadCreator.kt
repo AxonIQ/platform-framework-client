@@ -17,6 +17,7 @@
 package io.axoniq.platform.framework.client
 
 import io.axoniq.platform.framework.AxoniqPlatformConfiguration
+import io.axoniq.platform.framework.application.RuntimeInformationProvider
 import io.axoniq.platform.framework.api.AxonServerEventStoreMessageSourceInformation
 import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode
 import io.axoniq.platform.framework.api.CommandBusInformation
@@ -66,8 +67,9 @@ import java.time.temporal.ChronoUnit
 import java.time.temporal.TemporalAmount
 import kotlin.jvm.optionals.getOrNull
 
-class SetupPayloadCreator(
+class SetupPayloadCreator @JvmOverloads constructor(
         private val configuration: Configuration,
+        private val runtimeInformationProvider: RuntimeInformationProvider = RuntimeInformationProvider(),
 ) {
 
     fun createReport(): SetupPayload {
@@ -89,7 +91,9 @@ class SetupPayloadCreator(
                         modelInspection = hasStateManager(),
                         domainEventsInsights = resolveDomainEventAccessMode(),
                         deadLetterQueuesInsights = resolveDeadLetterQueuesInsights(),
-                )
+                ),
+                // On the connect path: losing the description beats losing the connection.
+                runtime = runCatching { runtimeInformationProvider.createReport() }.getOrNull(),
         )
     }
 
