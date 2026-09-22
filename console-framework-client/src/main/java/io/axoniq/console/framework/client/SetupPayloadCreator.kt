@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2024. AxonIQ B.V.
+ * Copyright (c) 2022-2026. AxonIQ B.V.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package io.axoniq.console.framework.client
 
 import io.axoniq.console.framework.api.*
+import io.axoniq.console.framework.application.RuntimeInformationProvider
 import io.axoniq.console.framework.unwrapPossiblyDecoratedClass
 import org.axonframework.commandhandling.CommandBus
 import org.axonframework.common.ReflectionUtils
@@ -35,10 +36,11 @@ import org.axonframework.util.MavenArtifactVersionResolver
 import java.time.temporal.ChronoUnit
 import java.time.temporal.TemporalAmount
 
-class SetupPayloadCreator(
+class SetupPayloadCreator @JvmOverloads constructor(
         private val configuration: Configuration,
         private val dlqMode: AxoniqConsoleDlqMode,
-        private val domainEventAccessMode: DomainEventAccessMode
+        private val domainEventAccessMode: DomainEventAccessMode,
+        private val runtimeInformationProvider: RuntimeInformationProvider = RuntimeInformationProvider(),
 ) {
     private val eventProcessingConfiguration = configuration.eventProcessingConfiguration() as EventProcessingModule
 
@@ -58,7 +60,8 @@ class SetupPayloadCreator(
                         threadDump = true,
                         deadLetterQueuesInsights = dlqMode,
                         domainEventsInsights = domainEventAccessMode,
-                )
+                ),
+                runtime = runCatching { runtimeInformationProvider.createReport() }.getOrNull(),
         )
     }
 
