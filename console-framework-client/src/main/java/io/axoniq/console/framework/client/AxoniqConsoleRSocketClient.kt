@@ -83,6 +83,9 @@ class AxoniqConsoleRSocketClient(
     @Volatile private var pausedReports = false
     private var supressConnectMessage = false
 
+    /** Whether a connection has ever succeeded, which decides how loudly a refusal is reported. */
+    private var hasEverConnected = false
+
     init {
         clientSettingsService.subscribeToSettings(heartbeatOrchestrator)
 
@@ -175,10 +178,16 @@ class AxoniqConsoleRSocketClient(
                 logger.info("Connection to Axoniq Platform set up successfully! This instance's name: $instanceName, settings: $settings")
                 supressConnectMessage = true
             }
+            hasEverConnected = true
             connectionRetryCount = 0
         } catch (e: Exception) {
-            if (connectionRetryCount == 10) {
-                logger.error("Failed to connect to Axoniq Platform. Error: ${e.message}. Will keep trying to connect...")
+            val refusedCredentials = isAuthenticationFailure(e)
+            if (shouldReport(refusedCredentials, hasEverConnected, connectionRetryCount)) {
+                if (refusedCredentials) {
+                    logger.info("Axoniq Platform refused this application's credentials. Check the access token and the environment it belongs to. Will keep trying to connect.")
+                } else {
+                    logger.info("Failed to connect to Axoniq Platform. Error: ${e.message}. Will keep trying to connect...")
+                }
                 supressConnectMessage = false
             }
             disposeCurrentConnection()
@@ -266,6 +275,45 @@ class AxoniqConsoleRSocketClient(
 
     companion object {
         private const val BACKOFF_FACTOR = 2.0
+
+        /**
+         * How often a persistent connection problem is repeated. With [BACKOFF_FACTOR] backing off to a
+         * minute, the first report lands about four minutes in and roughly every ten minutes after that:
+         * long enough for a platform-side blip to come and go unnoticed, often enough that a lasting
+         * problem cannot be missed.
+         */
+        private const val RETRIES_BETWEEN_REPORTS = 10
+
+        /**
+         * Whether this failure is worth a log line.
+         *
+         * A refusal on the very first attempt an application ever makes is said immediately. Nothing has
+         * ever worked, so a misconfigured token is far likelier than the platform having a moment, and
+         * whoever is starting the application is usually watching — four minutes of silence there is four
+         * minutes of a developer wondering why nothing appears. Once a connection has been established the
+         * same refusal is most likely transient, and saying so at once would be crying wolf, so it waits
+         * for the periodic report.
+         *
+         * Everything else — an unreachable platform, a broken pipe — is only ever reported periodically,
+         * since those genuinely do resolve on their own.
+         */
+        internal fun shouldReport(refusedCredentials: Boolean, hasEverConnected: Boolean, retryCount: Int): Boolean {
+            val firstEverAttempt = refusedCredentials && !hasEverConnected && retryCount == 1
+            return firstEverAttempt || (retryCount > 0 && retryCount % RETRIES_BETWEEN_REPORTS == 0)
+        }
+
+        private const val MAX_CAUSE_DEPTH = 5
+        private val AUTH_FAILURE_MARKERS = listOf("Access Denied", "authentication", "Unauthorized")
+
+        /**
+         * Whether the platform refused our credentials, as opposed to being unreachable. RSocket wraps the
+         * server's error, so the whole cause chain is considered.
+         */
+        internal fun isAuthenticationFailure(error: Throwable): Boolean =
+                generateSequence(error as Throwable?) { it.cause }
+                        .take(MAX_CAUSE_DEPTH)
+                        .mapNotNull { it.message }
+                        .any { message -> AUTH_FAILURE_MARKERS.any { message.contains(it, ignoreCase = true) } }
     }
 
     private inner class HeartbeatOrchestrator : ClientSettingsObserver {
@@ -327,11 +375,6 @@ class AxoniqConsoleRSocketClient(
                 .requestResponse(encodingStrategy.encode("", createRoutingMetadata(Routes.Management.SETTINGS_V2)))
                 .map {
                     encodingStrategy.decode(it, ClientSettingsV2::class.java)
-                }
-                .doOnError {
-                    if (it.message?.contains("Access Denied") == true) {
-                        logger.error("Was unable to send call to Axoniq Platform since authentication was incorrect!")
-                    }
                 }
     }
 

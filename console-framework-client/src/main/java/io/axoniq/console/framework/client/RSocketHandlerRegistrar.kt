@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2024. AxonIQ B.V.
+ * Copyright (c) 2022-2026. AxonIQ B.V.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -45,7 +45,7 @@ class RSocketHandlerRegistrar(
         override fun requestResponse(payload: Payload): Mono<Payload> {
             val route = routeFromPayload(payload)
             if (route == "authentication_failed") {
-                logger.warn("Authentication to AxonIQ Console failed. Are your properties set correctly?")
+                logger.debug("Axoniq Platform refused this connection's credentials; reconnecting.")
                 rSocket.dispose()
                 return Mono.empty()
             }
