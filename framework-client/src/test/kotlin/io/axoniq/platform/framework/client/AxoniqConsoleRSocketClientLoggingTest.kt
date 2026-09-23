@@ -30,7 +30,6 @@ class AxoniqConsoleRSocketClientLoggingTest {
         fun `recognises what the platform says when it rejects a token`() {
             assertTrue(isAuthFailure(RuntimeException("Access Denied")))
             assertTrue(isAuthFailure(RuntimeException("access denied")))
-            assertTrue(isAuthFailure(RuntimeException("Unauthorized")))
             assertTrue(isAuthFailure(RuntimeException("invalid authentication")))
         }
 
@@ -49,6 +48,15 @@ class AxoniqConsoleRSocketClientLoggingTest {
             assertFalse(isAuthFailure(java.net.ConnectException("Connection refused")))
             assertFalse(isAuthFailure(RuntimeException("Connection reset by peer")))
             assertFalse(isAuthFailure(RuntimeException(null as String?)))
+        }
+
+        @Test
+        fun `does not mistake a network failure that merely mentions authentication`() {
+            // Telling an operator to check their access token because a proxy or TLS handshake said
+            // "authentication" is the misattribution this all exists to remove.
+            assertFalse(isAuthFailure(RuntimeException("Proxy Authentication Required")))
+            assertFalse(isAuthFailure(RuntimeException("SSL handshake failed: client authentication")))
+            assertFalse(isAuthFailure(RuntimeException("Unauthorized")))
         }
 
         @Test

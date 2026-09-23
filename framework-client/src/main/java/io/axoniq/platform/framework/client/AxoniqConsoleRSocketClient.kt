@@ -206,7 +206,11 @@ class AxoniqConsoleRSocketClient(
                 }
                 .doOnError { e ->
                     disposeCurrentConnection()
-                    platformClientConnectionService.notifyUnreachable(classifyConnectionError(e))
+                    val reason = classifyConnectionError(e)
+                    val refused = reason == PlatformClientConnectionObserver.UnreachableReason.INVALID_AUTHENTICATION
+                    if (!refused || shouldReport(true, hasEverConnected, connectionRetryCount)) {
+                        platformClientConnectionService.notifyUnreachable(reason)
+                    }
                 }
                 .doFinally { synchronized(connectionLock) { pendingConnection = null } }
                 .cache()
@@ -352,7 +356,7 @@ class AxoniqConsoleRSocketClient(
         private const val RETRIES_BETWEEN_REPORTS = 10
 
         private const val MAX_CAUSE_DEPTH = 5
-        private val AUTH_FAILURE_MARKERS = listOf("Access Denied", "authentication", "Unauthorized")
+        private val AUTH_FAILURE_MARKERS = listOf("Access Denied", "invalid authentication")
 
         /**
          * Whether the platform refused our credentials, as opposed to being unreachable. RSocket wraps the
@@ -437,9 +441,7 @@ class AxoniqConsoleRSocketClient(
 
     private fun classifyConnectionError(e: Throwable): PlatformClientConnectionObserver.UnreachableReason {
         return when {
-            e.message?.contains("invalid authentication", ignoreCase = true) == true ->
-                PlatformClientConnectionObserver.UnreachableReason.INVALID_AUTHENTICATION
-            e.message?.contains("Access Denied", ignoreCase = true) == true ->
+            isAuthenticationFailure(e) ->
                 PlatformClientConnectionObserver.UnreachableReason.INVALID_AUTHENTICATION
             e is java.net.ConnectException || e.cause is java.net.ConnectException ->
                 PlatformClientConnectionObserver.UnreachableReason.NO_CONNECTION
