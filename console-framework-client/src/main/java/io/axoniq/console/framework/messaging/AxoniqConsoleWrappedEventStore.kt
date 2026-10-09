@@ -17,7 +17,6 @@
 package io.axoniq.console.framework.messaging
 
 import io.axoniq.console.framework.api.metrics.PreconfiguredMetric
-import io.axoniq.console.framework.messaging.AxoniqConsoleSpanFactory.Companion.onTopLevelSpanIfActive
 import org.axonframework.common.Registration
 import org.axonframework.common.stream.BlockingStream
 import org.axonframework.eventhandling.DomainEventMessage
@@ -27,8 +26,9 @@ import org.axonframework.eventhandling.TrackingToken
 import org.axonframework.eventsourcing.eventstore.DomainEventStream
 import org.axonframework.eventsourcing.eventstore.EventStore
 import org.axonframework.messaging.MessageDispatchInterceptor
+import org.axonframework.messaging.unitofwork.CurrentUnitOfWork
+import java.util.concurrent.atomic.AtomicLong
 import java.util.function.Consumer
-import java.util.stream.Collectors
 
 class AxoniqConsoleWrappedEventStore(
     private val delegate: EventStore
@@ -56,20 +56,27 @@ class AxoniqConsoleWrappedEventStore(
 
     override fun readEvents(aggregateIdentifier: String): DomainEventStream {
         val result = delegate.readEvents(aggregateIdentifier)
-        val events = result.asStream().map { it }.collect(Collectors.toList())
-        onTopLevelSpanIfActive {
-            it.registerMetricValue(PreconfiguredMetric.AGGREGATE_EVENTS_SIZE, events.size.toLong())
-        }
-        return DomainEventStream.of(events)
+        val count = AtomicLong()
+        registerAggregateEventsSizeOnPrepareCommit { count.get() }
+        return DomainEventStream.of(result.asStream().peek { count.incrementAndGet() }) { result.lastSequenceNumber }
     }
 
     override fun readEvents(aggregateIdentifier: String, firstSequenceNumber: Long): DomainEventStream {
         val result = delegate.readEvents(aggregateIdentifier, firstSequenceNumber)
-        val events = result.asStream().map { it }.collect(Collectors.toList())
-        val size = events.lastOrNull()?.sequenceNumber?.plus(1) ?: 0
-        onTopLevelSpanIfActive {
-            it.registerMetricValue(PreconfiguredMetric.AGGREGATE_EVENTS_SIZE, size)
+        registerAggregateEventsSizeOnPrepareCommit { result.lastSequenceNumber?.plus(1) ?: 0 }
+        return result
+    }
+
+    /**
+     * The returned stream is consumed lazily by the repository, so the size is only known once the unit of work
+     * prepares its commit. The span is captured up front, as it may no longer be the current one by then.
+     */
+    private fun registerAggregateEventsSizeOnPrepareCommit(size: () -> Long) {
+        val span = AxoniqConsoleSpanFactory.currentSpan() ?: return
+        CurrentUnitOfWork.ifStarted { uow ->
+            uow.onPrepareCommit {
+                span.registerMetricValue(PreconfiguredMetric.AGGREGATE_EVENTS_SIZE, size())
+            }
         }
-        return DomainEventStream.of(events)
     }
 }
