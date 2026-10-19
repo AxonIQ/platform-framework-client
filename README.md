@@ -7,7 +7,8 @@ within the framework.
 
 ![Screenshot of the handler performance screen](.github/img/screenshot_handler_performance.png)
 
-This repository contains the Open-Source connectors that your application will use through maven dependencies.
+This repository contains the connectors that your application will use through maven dependencies. See
+[License](#license).
 For actual configuration, please consult the setup instructions that will be provided by AxonIQ Console itself.
 
 [You can visit Axoniq Platform here.](https://platform.axoniq.io)
@@ -104,6 +105,12 @@ Message payloads never leave your application unless you explicitly opt in:
 | --- | --- | --- | --- |
 | DLQ inspection | `axoniq.platform.dlq-mode` | `NONE` | `MASKED`, `LIMITED`, `FULL` |
 | Domain event inspection | `axoniq.platform.domain-event-access-mode` | `NONE` | `PREVIEW_PAYLOAD_ONLY`, `LOAD_DOMAIN_STATE_ONLY`, `FULL` |
+
+## License
+
+Axoniq Platform Framework Client is licensed under the
+[Axoniq Terms of Service](https://www.axoniq.io/legal/terms-of-service), which govern all use of this software. See
+[LICENSE.txt](./LICENSE.txt). Questions about licensing should go to your Axoniq account contact, not GitHub issues.
 
 ## How to Release
 
