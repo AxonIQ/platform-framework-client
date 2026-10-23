@@ -9,6 +9,8 @@
 package io.axoniq.console.framework.starter
 
 import io.axoniq.platform.framework.AxoniqPlatformConfiguration
+import io.axoniq.platform.framework.workflow.PlatformWorkflowTelemetry
+import org.springframework.beans.factory.annotation.Value
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.config.BeanPostProcessor
 import org.springframework.boot.autoconfigure.AutoConfiguration
@@ -17,6 +19,8 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.ApplicationContext
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
+import javax.sql.DataSource
 
 @AutoConfiguration
 @Configuration
@@ -62,6 +66,15 @@ class AxoniqPlatformAutoConfiguration {
                 ?: (applicationContext.id?.removeSuffix("-1"))
     }
 
+
+    @Bean
+    @ConditionalOnProperty("axoniq.platform.workflow-source-id")
+    @ConditionalOnClass(name = ["io.axoniq.framework.workflow.history.inmemory.WorkflowHistoryProjector"])
+    fun platformWorkflowTelemetry(
+        @Value("\${axoniq.platform.workflow-source-id}") sourceId: String,
+        @Value("\${axoniq.platform.workflow-include-payloads:false}") includePayloads: Boolean,
+        dataSource: DataSource,
+    ) = PlatformWorkflowTelemetry.module(sourceId = sourceId, dataSource = dataSource, includePayloads = includePayloads)
 
     @Bean
     fun axoniqPlatformBeanPostProcessor(): BeanPostProcessor {

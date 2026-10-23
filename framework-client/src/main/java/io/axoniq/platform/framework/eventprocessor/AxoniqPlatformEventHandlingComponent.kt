@@ -81,6 +81,8 @@ class AxoniqPlatformEventHandlingComponent(
         return delegate.supportedEvents()
     }
 
+    override fun supports(eventName: QualifiedName): Boolean = delegate.supports(eventName)
+
     override fun sequenceIdentifierFor(event: EventMessage, context: ProcessingContext): Any {
         return delegate.sequenceIdentifierFor(event, context)
     }
