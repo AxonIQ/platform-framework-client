@@ -47,6 +47,13 @@
 
     <dependencies>
         <dependency>
+            <groupId>io.axoniq.framework</groupId>
+            <artifactId>axoniq-workflow-engine</artifactId>
+            <version>5.4.0</version>
+            <scope>provided</scope>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
             <groupId>io.axoniq.platform</groupId>
             <artifactId>axoniq-platform-framework-client-api</artifactId>
             <version>${project.version}</version>
@@ -128,6 +135,11 @@
         </dependency>
 
         <!--test dependencies-->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

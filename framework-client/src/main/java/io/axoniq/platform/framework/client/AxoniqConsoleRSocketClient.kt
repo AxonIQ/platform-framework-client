@@ -145,6 +145,12 @@ class AxoniqConsoleRSocketClient(
                 }
     }
 
+    fun <R : Any> sendAcknowledgedReport(payload: Any, route: String, responseType: Class<R>): Mono<R> =
+        Mono.defer {
+            if (status.enabled) retrieve(payload, route, responseType)
+            else Mono.error(IllegalStateException("Platform reporting is paused"))
+        }
+
     /**
      * Opens a server-streaming (request-stream) interaction on [route], decoding each emitted payload into
      * [responseType]. The returned [Flux] resolves the connection on each subscription and completes/errors

@@ -104,6 +104,7 @@ Message payloads never leave your application unless you explicitly opt in:
 | Feature | Property | Default | Opt-in values |
 | --- | --- | --- | --- |
 | DLQ inspection | `axoniq.platform.dlq-mode` | `NONE` | `MASKED`, `LIMITED`, `FULL` |
+| Workflow inspection | `axoniq.platform.workflow-include-payloads` | `false` | `true` |
 | Domain event inspection | `axoniq.platform.domain-event-access-mode` | `NONE` | `PREVIEW_PAYLOAD_ONLY`, `LOAD_DOMAIN_STATE_ONLY`, `FULL` |
 
 ## License
