@@ -84,6 +84,14 @@ object Routes {
         const val REPLAY_TIMELINE = "model-replay-timeline"
     }
 
+    object Workflow {
+        const val DEFINITIONS = "workflow-definitions"
+        const val EXECUTIONS = "workflow-executions"
+        const val EXECUTION = "workflow-execution"
+        const val EXECUTION_EVENTS = "workflow-execution-events"
+        const val METRICS = "workflow-metrics"
+    }
+
     object MessageFlow {
         const val STATS = "message-flow-stats"
     }

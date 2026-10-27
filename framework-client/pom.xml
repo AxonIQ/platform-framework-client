@@ -54,6 +54,16 @@
             <optional>true</optional>
         </dependency>
         <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm-tree</artifactId>
+            <version>${asm.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm-analysis</artifactId>
+            <version>${asm.version}</version>
+        </dependency>
+        <dependency>
             <groupId>io.axoniq.platform</groupId>
             <artifactId>axoniq-platform-framework-client-api</artifactId>
             <version>${project.version}</version>
@@ -134,12 +144,13 @@
             <scope>compile</scope>
         </dependency>
 
-        <!--test dependencies-->
         <dependency>
-            <groupId>com.h2database</groupId>
-            <artifactId>h2</artifactId>
+            <groupId>io.axoniq.framework</groupId>
+            <artifactId>axoniq-workflow-dsl</artifactId>
+            <version>${axoniq-framework.version}</version>
             <scope>test</scope>
         </dependency>
+        <!--test dependencies-->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
