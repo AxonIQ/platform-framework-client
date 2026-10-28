@@ -10,6 +10,7 @@ package io.axoniq.platform.framework.eventsourcing;
 
 import io.axoniq.platform.framework.messaging.HandlerMetricsRegistry;
 import io.axoniq.platform.framework.modelling.EntityMetricsRegistry;
+import io.axoniq.platform.framework.workflow.WorkflowStatisticsCollector;
 import org.axonframework.common.configuration.ComponentRegistry;
 import org.axonframework.common.configuration.DecoratorDefinition;
 import org.axonframework.eventsourcing.eventstore.EventStorageEngine;
@@ -32,7 +33,9 @@ final class EventSourcingDecorators {
                                    .with((c, name, delegate) -> {
                                        HandlerMetricsRegistry metricsRegistry = c.getComponent(HandlerMetricsRegistry.class);
                                        EntityMetricsRegistry entityMetricsRegistry = c.getComponent(EntityMetricsRegistry.class);
-                                       return new AxoniqPlatformEventStorageEngine(delegate, metricsRegistry, entityMetricsRegistry);
+                                       WorkflowStatisticsCollector workflowStatistics =
+                                               c.getOptionalComponent(WorkflowStatisticsCollector.class).orElse(null);
+                                       return new AxoniqPlatformEventStorageEngine(delegate, metricsRegistry, entityMetricsRegistry, workflowStatistics);
                                    }).order(Integer.MAX_VALUE));
 
         registry.registerDecorator(

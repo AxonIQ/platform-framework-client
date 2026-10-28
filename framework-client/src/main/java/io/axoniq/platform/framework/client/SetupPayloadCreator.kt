@@ -81,6 +81,7 @@ class SetupPayloadCreator @JvmOverloads constructor(
                         clientStatusUpdates = true,
                         licenseEntitlement = hasEntitlementManager(),
                         modelInspection = hasStateManager(),
+                        workflowDefinitions = hasWorkflowEngine(),
                         domainEventsInsights = resolveDomainEventAccessMode(),
                         deadLetterQueuesInsights = resolveDeadLetterQueuesInsights(),
                 ),
@@ -348,6 +349,15 @@ class SetupPayloadCreator @JvmOverloads constructor(
         ))?.javaClass?.simpleName?.let { SerializerInformation(type = it, false) }
     }
 
+
+    private fun hasWorkflowEngine(): Boolean {
+        try {
+            val responderClass = Class.forName("io.axoniq.platform.framework.workflow.WorkflowDefinitionsResponder")
+            return configuration.hasComponent(responderClass)
+        } catch (_: ClassNotFoundException) {
+            return false
+        }
+    }
 
     /**
      * Checks whether a StateManager has been registered, indicating AF5 model inspection support.

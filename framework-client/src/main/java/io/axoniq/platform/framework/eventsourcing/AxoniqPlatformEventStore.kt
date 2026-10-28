@@ -14,6 +14,7 @@ import io.axoniq.platform.framework.modelling.EntityMetricsRegistry
 import org.axonframework.common.Registration
 import org.axonframework.common.infra.ComponentDescriptor
 import org.axonframework.eventsourcing.eventstore.ConsistencyMarker
+import org.axonframework.eventsourcing.eventstore.AppendCondition
 import org.axonframework.eventsourcing.eventstore.EventStore
 import org.axonframework.eventsourcing.eventstore.EventStoreTransaction
 import org.axonframework.eventsourcing.eventstore.Position
@@ -29,6 +30,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import java.util.function.BiFunction
 import java.util.function.Consumer
+import java.util.function.UnaryOperator
 
 class AxoniqPlatformEventStore(private val delegate: EventStore, private val entityMetricsRegistry: EntityMetricsRegistry) : EventStore {
     override fun transaction(processingContext: ProcessingContext): EventStoreTransaction {
@@ -123,6 +125,10 @@ class AxoniqPlatformEventStore(private val delegate: EventStore, private val ent
 
         override fun onAppend(callback: Consumer<EventMessage>) {
             delegate.onAppend(callback)
+        }
+
+        override fun overrideAppendCondition(modifier: UnaryOperator<AppendCondition>) {
+            delegate.overrideAppendCondition(modifier)
         }
 
         override fun appendPosition(): ConsistencyMarker {
