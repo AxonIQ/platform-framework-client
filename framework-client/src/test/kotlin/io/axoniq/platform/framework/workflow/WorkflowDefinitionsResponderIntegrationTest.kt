@@ -23,7 +23,8 @@ import io.axoniq.platform.framework.api.DomainEventAccessMode
 import io.axoniq.platform.framework.api.WorkflowExecutionEventsQuery
 import io.axoniq.platform.framework.api.WorkflowExecutionQuery
 import io.axoniq.platform.framework.api.WorkflowExecutionsQuery
-import io.axoniq.platform.framework.api.WorkflowMetricsQuery
+import io.axoniq.platform.framework.api.metrics.WorkflowStatisticIdentifier
+import io.axoniq.platform.framework.api.metrics.WorkflowStatistics
 import io.axoniq.platform.framework.client.RSocketHandlerRegistrar
 import io.axoniq.platform.framework.client.strategy.CborJackson3EncodingStrategy
 import org.axonframework.common.configuration.AxonConfiguration
@@ -34,7 +35,6 @@ import org.axonframework.messaging.eventhandling.EventSink
 import org.axonframework.messaging.eventhandling.GenericEventMessage
 import org.awaitility.Awaitility.await
 import java.time.Duration
-import java.time.Instant
 import java.util.function.UnaryOperator
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -81,6 +81,10 @@ class WorkflowDefinitionsResponderIntegrationTest {
         configuration.shutdown()
     }
 
+    private fun publish(type: String, orderId: String) = configuration.getComponent(EventSink::class.java)
+            .publish(null, GenericEventMessage(MessageType(type), mapOf("orderId" to orderId)))
+            .get()
+
     private fun definition(name: String): WorkflowDefinitionDescription =
             responder.definitions().definitions.single { it.name == name }
 
@@ -113,9 +117,7 @@ class WorkflowDefinitionsResponderIntegrationTest {
 
         @BeforeEach
         fun startBothWorkflows() {
-            configuration.getComponent(EventSink::class.java)
-                    .publish(null, GenericEventMessage(MessageType("OrderPlaced"), mapOf("orderId" to "order-1")))
-                    .get()
+            publish("OrderPlaced", orderId = "order-1")
             await().atMost(Duration.ofSeconds(10)).until {
                 executions.executions(WorkflowExecutionsQuery()).items.map { it.status }.toSet() == setOf("STARTED", "COMPLETED")
             }
@@ -181,33 +183,121 @@ class WorkflowDefinitionsResponderIntegrationTest {
             assertEquals(null, executions.execution(WorkflowExecutionQuery(workflowId = "unknown")).execution)
         }
 
-        @Test
-        fun `metrics count starts and ends, open instances and open waits`() {
-            val now = Instant.now().epochSecond
-            val metrics = executions.metrics(WorkflowMetricsQuery(timeStart = now - 600, timeEnd = now + 60))
+        @Nested
+        inner class AfterTheFirstRead {
 
-            val annotated = metrics.workflows.single { it.definitionName == "annotatedOrder" }
-            assertEquals(1, annotated.started)
-            assertEquals(1, annotated.openInstances)
-            assertEquals(1, annotated.waitingSteps)
-            val lambda = metrics.workflows.single { it.definitionName == "lambda" }
-            assertEquals(1, lambda.completed)
-            assertEquals(0, lambda.openInstances)
-            assertTrue(metrics.steps.isEmpty())
+            @Test
+            fun `executions started since are listed`() {
+                assertEquals(2, executions.executions(WorkflowExecutionsQuery()).total)
+
+                publish("OrderPlaced", orderId = "order-2")
+                await().atMost(Duration.ofSeconds(10)).until {
+                    executions.executions(WorkflowExecutionsQuery(status = "COMPLETED")).total == 2L
+                }
+
+                assertEquals(4, executions.executions(WorkflowExecutionsQuery()).total)
+            }
+
+            @Test
+            fun `an execution that ends is listed as ended`() {
+                publish(Map::class.java.name, orderId = "order-1")
+
+                await().atMost(Duration.ofSeconds(10)).until {
+                    executions.executions(WorkflowExecutionsQuery(search = "order-1")).items.single().status == "COMPLETED"
+                }
+            }
+        }
+    }
+
+    @Nested
+    inner class Statistics {
+
+        private val collector get() = configuration.getComponent(WorkflowStatisticsCollector::class.java)
+        private val reported = HashMap<WorkflowStatisticIdentifier, WorkflowStatistics>()
+
+        private fun drain() = collector.drain().forEach { (key, statistics) ->
+            reported.merge(key, statistics) { before, now ->
+                WorkflowStatistics(
+                        started = before.started + now.started,
+                        completed = before.completed + now.completed,
+                        failed = before.failed + now.failed,
+                        cancelled = before.cancelled + now.cancelled,
+                        timedOut = before.timedOut + now.timedOut,
+                        retries = before.retries + now.retries,
+                        measured = before.measured + now.measured,
+                        durationMillis = before.durationMillis + now.durationMillis,
+                        open = now.open,
+                )
+            }
+        }
+
+        private fun of(definition: String, step: String? = null): WorkflowStatistics {
+            drain()
+            return reported[WorkflowStatisticIdentifier(definitionName = definition, definitionVersion = "0.0.1", stepName = step)]
+                    ?: WorkflowStatistics()
+        }
+
+        @BeforeEach
+        fun startBothWorkflows() {
+            publish("OrderPlaced", orderId = "order-1")
+            await().atMost(Duration.ofSeconds(10)).until { of("annotatedOrder", "paymentReceived").open == 1L }
         }
 
         @Test
-        fun `metrics of one definition have a series and measured steps`() {
-            val now = Instant.now().epochSecond
-            val metrics = executions.metrics(WorkflowMetricsQuery(
-                    timeStart = now - 600, timeEnd = now + 60, definitionName = "lambda", definitionVersion = "0.0.1",
-            ))
+        fun `a workflow's starts, ends and duration are reported`() {
+            val lambda = of("lambda")
 
-            assertEquals(1, metrics.series.sumOf { it.started })
-            assertEquals(1, metrics.series.sumOf { it.completed })
-            assertEquals(listOf("first", "second"), metrics.steps.map { it.stepName })
-            assertTrue(metrics.steps.all { it.executions == 1L && it.completed == 1L && it.measuredAttempts == 1L })
-            assertEquals(listOf("first", "second"), metrics.observedSteps)
+            assertEquals(1, lambda.started)
+            assertEquals(1, lambda.completed)
+            assertEquals(1, lambda.measured)
+            assertEquals(0, lambda.open)
+        }
+
+        @Test
+        fun `every step is counted and measured from its start to its end`() {
+            listOf("first", "second").forEach { step ->
+                val statistics = of("lambda", step)
+                assertEquals(1, statistics.started, step)
+                assertEquals(1, statistics.completed, step)
+                assertEquals(1, statistics.measured, step)
+            }
+        }
+
+        @Test
+        fun `open instances and waiting steps are reported until they end`() {
+            assertEquals(1, of("annotatedOrder").open)
+            assertEquals(0, of("annotatedOrder", "paymentReceived").completed)
+
+            publish(Map::class.java.name, orderId = "order-1")
+            await().atMost(Duration.ofSeconds(10)).until { of("annotatedOrder").completed == 1L }
+
+            val payment = of("annotatedOrder", "paymentReceived")
+            assertEquals(1, payment.completed)
+            assertEquals(1, payment.measured)
+            await().atMost(Duration.ofSeconds(10)).until { of("annotatedOrder").open == 0L && of("annotatedOrder", "paymentReceived").open == 0L }
+        }
+
+        @Test
+        fun `counts are reported once, not again in the next report`() {
+            publish("OrderPlaced", orderId = "order-2")
+            await().atMost(Duration.ofSeconds(10)).until { of("lambda").completed == 2L }
+
+            repeat(3) { drain() }
+
+            assertEquals(2, of("lambda").started)
+            assertEquals(2, of("annotatedOrder").started)
+        }
+
+        @Test
+        fun `instances started before the tracker existed are read from the event store`() {
+            val tracker = WorkflowInstanceTracker(configuration)
+
+            tracker.refresh()
+
+            val open = tracker.openCounts()!!
+            assertEquals(1, open[WorkflowStatisticIdentifier(definitionName = "annotatedOrder", definitionVersion = "0.0.1")])
+            assertEquals(1, open[WorkflowStatisticIdentifier(definitionName = "annotatedOrder", definitionVersion = "0.0.1", stepName = "paymentReceived")])
+            assertEquals(null, open[WorkflowStatisticIdentifier(definitionName = "lambda", definitionVersion = "0.0.1")])
         }
     }
 

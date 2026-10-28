@@ -28,6 +28,7 @@ import io.axoniq.platform.framework.client.PlatformClientConnectionObserver
 import io.axoniq.platform.framework.client.PlatformClientConnectionService
 import io.axoniq.platform.framework.computeIfAbsentWithRetry
 import io.axoniq.platform.framework.modelling.EntityMetricsRegistry
+import io.axoniq.platform.framework.workflow.WorkflowStatisticsCollector
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.micrometer.core.instrument.Timer
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -41,9 +42,13 @@ class HandlerMetricsRegistry(
         private val platformClientConnectionService: PlatformClientConnectionService,
         private val properties: AxoniqPlatformConfiguration,
         private val entityMetricsRegistry: EntityMetricsRegistry,
+        private val workflowStatistics: WorkflowStatisticsCollector? = null,
 ) : PlatformClientConnectionObserver {
     private val logger = KotlinLogging.logger { }
     private var reportTask: ScheduledFuture<*>? = null
+
+    @Volatile
+    private var lastReportAt = 0L
     private val meterRegistry = SimpleMeterRegistry()
     private val executor: ScheduledExecutorService = properties.reportingTaskExecutor
 
@@ -65,8 +70,13 @@ class HandlerMetricsRegistry(
             return
         }
         logger.debug { "Sending handler information every ${settings.handlerReportInterval}ms to Axoniq Platform" }
+        // New settings arrive as a reconnect. Reporting right away would send a report within the interval of the
+        // previous one, which Inspector rejects as rate limited, losing the workflow counts it carries.
+        val sinceLastReport = System.currentTimeMillis() - lastReportAt
+        val initialDelay = (settings.handlerReportInterval - sinceLastReport).coerceIn(0, settings.handlerReportInterval)
         this.reportTask = executor.scheduleAtFixedRate({
             try {
+                lastReportAt = System.currentTimeMillis()
                 val stats = getStats()
                 logger.debug { "Sending metrics: $stats" }
                 axoniqConsoleRSocketClient.sendReport(Routes.MessageFlow.STATS, stats)
@@ -78,7 +88,7 @@ class HandlerMetricsRegistry(
             } catch (e: Exception) {
                 logger.warn { "No metrics could be reported to AxonIQ Console: ${e.message}" }
             }
-        }, 0, settings.handlerReportInterval, TimeUnit.MILLISECONDS)
+        }, initialDelay, settings.handlerReportInterval, TimeUnit.MILLISECONDS)
     }
 
     override fun onDisconnected() {
@@ -114,6 +124,7 @@ class HandlerMetricsRegistry(
                 },
             aggregates = emptyList(),
             entities = entityMetricsRegistry.getStats(),
+            workflows = workflowStatistics?.drain().orEmpty(),
         )
         return flow
     }

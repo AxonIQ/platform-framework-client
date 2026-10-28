@@ -19,4 +19,6 @@ data class StatisticReport(
     val aggregates: List<AggregateStatisticsWithIdentifier>,
     @JsonProperty("e")
     val entities: List<EntityStatisticsWithIdentifier> = emptyList(),
+    @JsonProperty("w")
+    val workflows: List<WorkflowStatisticsWithIdentifier> = emptyList(),
 )

@@ -89,7 +89,6 @@ object Routes {
         const val EXECUTIONS = "workflow-executions"
         const val EXECUTION = "workflow-execution"
         const val EXECUTION_EVENTS = "workflow-execution-events"
-        const val METRICS = "workflow-metrics"
     }
 
     object MessageFlow {

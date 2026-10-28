@@ -18,8 +18,9 @@ import org.axonframework.common.lifecycle.Phase;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Registers the {@link WorkflowDefinitionsResponder} and the {@link WorkflowExecutionsResponder}, and hands the first
- * every workflow module's {@link WorkflowConfigurationRegistry}. Each workflow module registers its registry under its
+ * Registers the {@link WorkflowDefinitionsResponder}, the {@link WorkflowExecutionsResponder} and the
+ * {@link WorkflowMetricsRegistry} that feeds the statistics report, and hands the definitions responder every
+ * workflow module's {@link WorkflowConfigurationRegistry}. Each workflow module registers its registry under its
  * own name; a single decorator by type reaches all of them, because nested modules share the application's component
  * registry.
  */
@@ -44,6 +45,9 @@ final class WorkflowDefinitionDecorators {
                                            .withBuilder(c -> new WorkflowExecutionsResponder(
                                                    c.getComponent(RSocketHandlerRegistrar.class), c))
                                            .onStart(Phase.EXTERNAL_CONNECTIONS, WorkflowExecutionsResponder::start));
+        registry.registerComponent(ComponentDefinition
+                                           .ofType(WorkflowStatisticsCollector.class)
+                                           .withBuilder(WorkflowMetricsRegistry::new));
         registry.registerDecorator(DecoratorDefinition
                 .forType((Class) WorkflowConfigurationRegistry.class)
                 .with((config, name, delegate) -> delegate)

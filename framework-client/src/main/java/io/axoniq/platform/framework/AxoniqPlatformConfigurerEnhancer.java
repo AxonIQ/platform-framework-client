@@ -30,6 +30,7 @@ import io.axoniq.platform.framework.messaging.AxoniqPlatformCommandBus;
 import io.axoniq.platform.framework.messaging.AxoniqPlatformQueryBus;
 import io.axoniq.platform.framework.messaging.HandlerMetricsRegistry;
 import io.axoniq.platform.framework.modelling.EntityMetricsRegistry;
+import io.axoniq.platform.framework.workflow.WorkflowStatisticsCollector;
 import org.axonframework.common.configuration.ComponentDefinition;
 import org.axonframework.common.configuration.ComponentRegistry;
 import org.axonframework.common.configuration.Configuration;
@@ -138,7 +139,8 @@ public class AxoniqPlatformConfigurerEnhancer implements ConfigurationEnhancer {
                                                    c.getComponent(AxoniqConsoleRSocketClient.class),
                                                    c.getComponent(PlatformClientConnectionService.class),
                                                    c.getComponent(AxoniqPlatformConfiguration.class),
-                                                   c.getComponent(EntityMetricsRegistry.class))))
+                                                   c.getComponent(EntityMetricsRegistry.class),
+                                                   c.getOptionalComponent(WorkflowStatisticsCollector.class).orElse(null))))
                 .registerComponent(ComponentDefinition
                                            .ofType(ApplicationThreadDumpProvider.class)
                                            .withBuilder(c -> new ApplicationThreadDumpProvider()))
