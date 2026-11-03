@@ -8,6 +8,9 @@
 
 package io.axoniq.platform.framework.eventprocessor
 
+import io.axoniq.framework.messaging.deadletter.GenericDeadLetter
+import io.axoniq.framework.messaging.deadletter.SequencedDeadLetterQueue
+import io.axoniq.framework.messaging.eventhandling.deadletter.DeadLetterQueueConfiguration
 import io.axoniq.platform.framework.messaging.HandlerMetricsRegistry
 import io.axoniq.platform.framework.modelling.EntityMetricsRegistry
 import io.mockk.every
@@ -17,7 +20,11 @@ import org.axonframework.common.configuration.ComponentDefinition
 import org.axonframework.common.configuration.DecoratorDefinition
 import org.axonframework.eventsourcing.configuration.EventSourcingConfigurer
 import org.axonframework.messaging.core.MessageStream
+import org.axonframework.messaging.core.MessageType
+import org.axonframework.messaging.core.QualifiedName
 import org.axonframework.messaging.eventhandling.EventHandlingComponent
+import org.axonframework.messaging.eventhandling.EventMessage
+import org.axonframework.messaging.eventhandling.GenericEventMessage
 import org.axonframework.messaging.eventhandling.SimpleEventHandlingComponent
 import org.axonframework.messaging.eventhandling.processing.streaming.StreamingEventProcessor
 import org.axonframework.messaging.eventhandling.processing.streaming.pooled.PooledStreamingEventProcessorModule
@@ -28,6 +35,7 @@ import org.axonframework.messaging.eventhandling.replay.ResetHandler
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Test
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
@@ -40,6 +48,8 @@ class AxoniqPlatformEventHandlingComponentResetTest {
 
     companion object {
         private const val PROCESSOR_NAME = "projection"
+        private const val COMPONENT_NAME = "component"
+        private const val SEQUENCE_ID = "sequence"
     }
 
     private var configuration: AxonConfiguration? = null
@@ -52,10 +62,7 @@ class AxoniqPlatformEventHandlingComponentResetTest {
     @Test
     fun `resetting the processor invokes the reset handler of the wrapped component`() {
         val resets = CopyOnWriteArrayList<Any>()
-        val processor = start(SimpleEventHandlingComponent.create("projector").subscribe(ResetHandler { resetContext, _ ->
-            resets += resetContext
-            MessageStream.empty()
-        }))
+        val processor = start(recordingResets(resets))
 
         processor.shutdown().get(5, TimeUnit.SECONDS)
         processor.resetTokens().get(5, TimeUnit.SECONDS)
@@ -86,7 +93,61 @@ class AxoniqPlatformEventHandlingComponentResetTest {
         assertEquals(listOf(ReplayStatus.REPLAY), changes)
     }
 
-    private fun start(component: EventHandlingComponent): StreamingEventProcessor {
+    @Test
+    fun `resetting the processor clears the dead-letter queue`() {
+        val resets = CopyOnWriteArrayList<Any>()
+        val processor = start(recordingResets(resets), DeadLetterQueueConfiguration().enabled())
+        val dlq = resolveDlq()
+        enqueue(dlq)
+
+        processor.shutdown().get(5, TimeUnit.SECONDS)
+        processor.resetTokens().get(5, TimeUnit.SECONDS)
+
+        assertEquals(0L, dlq.size(null).get(5, TimeUnit.SECONDS))
+        assertEquals(1, resets.size)
+    }
+
+    @Test
+    fun `resetting the processor keeps dead letters when clearOnReset is false`() {
+        val resets = CopyOnWriteArrayList<Any>()
+        val processor = start(recordingResets(resets), DeadLetterQueueConfiguration().enabled().clearOnReset(false))
+        val dlq = resolveDlq()
+        enqueue(dlq)
+
+        processor.shutdown().get(5, TimeUnit.SECONDS)
+        processor.resetTokens().get(5, TimeUnit.SECONDS)
+
+        assertEquals(1L, dlq.size(null).get(5, TimeUnit.SECONDS))
+        assertEquals(1, resets.size)
+    }
+
+    private fun recordingResets(resets: MutableList<Any>): EventHandlingComponent =
+            SimpleEventHandlingComponent.create("projector").subscribe(ResetHandler { resetContext, _ ->
+                resets += resetContext
+                MessageStream.empty()
+            })
+
+    private fun resolveDlq(): SequencedDeadLetterQueue<EventMessage> {
+        val expectedName = "DeadLetterQueue[EventHandlingComponent[$PROCESSOR_NAME][$COMPONENT_NAME]]"
+        val dlq = configuration!!.moduleConfigurations.asSequence()
+                .flatMap { it.getComponents(SequencedDeadLetterQueue::class.java).entries.asSequence() }
+                .firstOrNull { it.key == expectedName }
+                ?.value
+        assertNotNull(dlq, "Expected the framework to create a DLQ named [$expectedName]")
+        @Suppress("UNCHECKED_CAST")
+        return dlq as SequencedDeadLetterQueue<EventMessage>
+    }
+
+    private fun enqueue(dlq: SequencedDeadLetterQueue<EventMessage>) {
+        val message: EventMessage = GenericEventMessage(MessageType(QualifiedName("test-event")), "payload")
+        val letter = GenericDeadLetter<EventMessage>(SEQUENCE_ID, message, RuntimeException("deliberate failure"))
+        dlq.enqueue(SEQUENCE_ID, letter, null).get(5, TimeUnit.SECONDS)
+    }
+
+    private fun start(
+            component: EventHandlingComponent,
+            deadLetterQueue: DeadLetterQueueConfiguration? = null,
+    ): StreamingEventProcessor {
         val configuration = EventSourcingConfigurer.create()
                 .componentRegistry { registry ->
                     registry.registerComponent(ComponentDefinition.ofType(HandlerMetricsRegistry::class.java)
@@ -101,8 +162,13 @@ class AxoniqPlatformEventHandlingComponentResetTest {
                         eventProcessing.pooledStreaming { psep ->
                             psep.processor(
                                     PooledStreamingEventProcessorModule(PROCESSOR_NAME)
-                                            .eventHandlingComponents { components -> components.declarative("component") { _ -> component } }
-                                            .notCustomized()
+                                            .eventHandlingComponents { components -> components.declarative(COMPONENT_NAME) { _ -> component } }
+                                            .customized { _, cfg ->
+                                                if (deadLetterQueue != null) {
+                                                    cfg.extend(DeadLetterQueueConfiguration::class.java) { deadLetterQueue }
+                                                }
+                                                cfg
+                                            }
                                             .componentRegistry { moduleRegistry ->
                                                 moduleRegistry.registerDecorator(
                                                         DecoratorDefinition.forType(EventHandlingComponent::class.java)
