@@ -9,6 +9,7 @@
 package io.axoniq.platform.framework.workflow
 
 import io.axoniq.platform.framework.api.WorkflowGraph
+import io.axoniq.platform.framework.api.WorkflowGraphEdge
 import io.axoniq.platform.framework.api.WorkflowGraphEdgeKind
 import io.axoniq.platform.framework.api.WorkflowGraphNode
 import io.axoniq.platform.framework.api.WorkflowGraphNodeKind
@@ -101,7 +102,8 @@ internal object WorkflowBpmnWriter {
 
     /** Column = longest distance from the start over forward edges; nodes share a column top to bottom. */
     private fun layout(graph: WorkflowGraph): Map<String, Pair<Int, Int>> {
-        val forward = graph.edges.filter { it.kind != WorkflowGraphEdgeKind.LOOP }
+        val back = backEdges(graph)
+        val forward = graph.edges.filter { it.kind != WorkflowGraphEdgeKind.LOOP && it !in back }
         val incoming = graph.nodes.associate { node -> node.id to forward.count { it.to == node.id } }.toMutableMap()
         val column = HashMap<String, Int>()
         val queue = ArrayDeque(graph.nodes.filter { incoming[it.id] == 0 }.map { it.id })
@@ -122,6 +124,41 @@ internal object WorkflowBpmnWriter {
             val r = rows.merge(c, 1, Int::plus)!! - 1
             node.id to (MARGIN + c * COLUMN to MARGIN + r * ROW)
         }
+    }
+
+    /**
+     * The edges that close a cycle, whatever their kind: a retry through a catch block loops back by an error edge, and
+     * a cycle left in the forward edges keeps every node after it from getting a column.
+     */
+    private fun backEdges(graph: WorkflowGraph): Set<WorkflowGraphEdge> {
+        val outgoing = graph.edges.groupBy { it.from }
+        val onPath = HashSet<String>()
+        val done = HashSet<String>()
+        val back = HashSet<WorkflowGraphEdge>()
+        val roots = graph.nodes.filter { it.kind == WorkflowGraphNodeKind.START } + graph.nodes
+        roots.forEach { root ->
+            if (root.id in done || root.id in onPath) return@forEach
+            val stack = ArrayDeque(listOf(root.id to outgoing[root.id].orEmpty().iterator()))
+            onPath += root.id
+            while (stack.isNotEmpty()) {
+                val (node, edges) = stack.last()
+                if (!edges.hasNext()) {
+                    stack.removeLast()
+                    onPath -= node
+                    done += node
+                    continue
+                }
+                val edge = edges.next()
+                when (edge.to) {
+                    in onPath -> back += edge
+                    !in done -> {
+                        onPath += edge.to
+                        stack.addLast(edge.to to outgoing[edge.to].orEmpty().iterator())
+                    }
+                }
+            }
+        }
+        return back
     }
 
     /** Where a node sits, label included: an event's or gateway's name is drawn below it. */
@@ -151,7 +188,8 @@ internal object WorkflowBpmnWriter {
     /**
      * Routes an edge so it crosses no other node or label. A forward edge turns in one of the free channels between
      * columns; when every channel would cross something, it runs along a lane below the nodes it passes. An edge back
-     * to an earlier column goes around underneath everything in between.
+     * to an earlier column leaves and enters through the channels beside its ends and goes around underneath everything
+     * in between, so it passes no node in its own column.
      */
     private fun waypoints(
             from: WorkflowGraphNode,
@@ -168,7 +206,9 @@ internal object WorkflowBpmnWriter {
         val clear = { route: List<Pair<Int, Int>> -> route.zipWithNext().none { (a, b) -> others.any { it.crossedBy(a, b) } } }
         val below = boxes.values.filter { column((it.left + it.right) / 2) in columns }.maxOf { it.bottom } + 30
         if (tx <= fx) {
-            return listOf(fx to fy + size(from).second / 2, fx to below, tx to below, tx to ty + size(to).second / 2)
+            val out = channel(column(fx)) - DETOUR_OFFSET
+            val into = if (column(tx) > 0) channel(column(tx) - 1) + DETOUR_OFFSET else tx - toHalf - DETOUR_OFFSET
+            return listOf(fx + fromHalf to fy, out to fy, out to below, into to below, into to ty, tx - toHalf to ty)
         }
         val start = fx + fromHalf to fy
         val end = tx - toHalf to ty

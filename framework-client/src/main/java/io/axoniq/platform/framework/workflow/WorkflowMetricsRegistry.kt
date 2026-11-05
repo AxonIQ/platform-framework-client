@@ -9,6 +9,7 @@
 package io.axoniq.platform.framework.workflow
 
 import io.axoniq.framework.workflow.dsl.api.WorkflowStatus
+import io.axoniq.framework.workflow.runtime.execution.EventSourcedWorkflowState
 import io.axoniq.platform.framework.api.metrics.WorkflowStatisticIdentifier
 import io.axoniq.platform.framework.api.metrics.WorkflowStatistics
 import io.axoniq.platform.framework.api.metrics.WorkflowStatisticsWithIdentifier
@@ -18,122 +19,161 @@ import io.github.oshai.kotlinlogging.KotlinLogging
 import io.micrometer.core.instrument.Timer
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.axonframework.common.configuration.Configuration
+import org.axonframework.eventsourcing.eventstore.EventStore
 import org.axonframework.messaging.eventhandling.EventMessage
 import org.axonframework.messaging.eventstreaming.EventCriteria
-import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.LongAdder
 
 /**
  * Counts what the workflows on this node do, per definition version and per step, from the events this node appends,
- * and measures each attempt from its start to its end. The counts are the ones since the previous report, so Inspector
- * adds up the reports of all nodes.
+ * and measures each attempt from its start to its end. Every report carries the totals since the counting of each
+ * workflow or step began on this node, so a report that is lost only delays the counts: Inspector takes the difference
+ * between reports of the same node.
  *
- * Step events carry only the instance's id, so the definition of an instance comes from [WorkflowInstanceTracker],
- * which also gives the open instances and waits for the report. A step event of an instance the tracker does not know
- * yet, started on another node a moment ago, waits for the tracker's next refresh.
+ * Step events carry only the instance's id. The definition of an instance comes from [WorkflowExecutionsProjection],
+ * which also gives the open instances and waits for the report. An event of an instance it does not know, because
+ * it started on another node or before this node, is resolved in the background from that instance's own events.
+ * All of an instance's metrics count towards the version it started with, also after a version migration.
  */
-class WorkflowMetricsRegistry(configuration: Configuration) : WorkflowStatisticsCollector {
+internal class WorkflowMetricsRegistry(
+        configuration: Configuration,
+        private val projection: WorkflowExecutionsProjection,
+) : WorkflowStatisticsCollector {
     private val logger = KotlinLogging.logger { }
-    private val tracker = WorkflowInstanceTracker(configuration)
+    private val instances = InstanceSource(configuration)
     private val meterRegistry = SimpleMeterRegistry()
+    private val startedAt = Instant.now().epochSecond
     private val statistics = ConcurrentHashMap<WorkflowStatisticIdentifier, Counters>()
     private val attemptStarts = BoundedMap<Pair<String, String>, Long>(MAX_PENDING)
     private val unresolved = BoundedMap<String, EventMessage>(MAX_PENDING)
-    private val refreshing = AtomicBoolean(false)
-    private val refresher = Executors.newSingleThreadExecutor { Thread(it, "axoniq-platform-workflow-tracker").apply { isDaemon = true } }
+    private val working = AtomicBoolean(false)
+    private val background = Executors.newSingleThreadExecutor { Thread(it, "axoniq-platform-workflows").apply { isDaemon = true } }
 
     override fun onAppended(events: List<EventMessage>) {
         events.forEach { record(it) }
     }
 
     override fun drain(): List<WorkflowStatisticsWithIdentifier> {
-        unresolved.drain().forEach { record(it) }
-        refreshTrackerInBackground()
-        val open = tracker.openCounts()
+        workInBackground()
+        val open = projection.openCounts()
         return (statistics.keys + open.orEmpty().keys).map { key ->
             val counters = statistics[key]
-            val measured = counters?.measured?.sumThenReset() ?: 0
+            val measured = counters?.measured?.sum() ?: 0
+            val newlyMeasured = counters != null && counters.reportedMeasured.getAndSet(measured) != measured
             WorkflowStatisticsWithIdentifier(key, WorkflowStatistics(
-                    started = counters?.started?.sumThenReset() ?: 0,
-                    completed = counters?.completed?.sumThenReset() ?: 0,
-                    failed = counters?.failed?.sumThenReset() ?: 0,
-                    cancelled = counters?.cancelled?.sumThenReset() ?: 0,
-                    timedOut = counters?.timedOut?.sumThenReset() ?: 0,
-                    retries = counters?.retries?.sumThenReset() ?: 0,
+                    started = counters?.started?.sum() ?: 0,
+                    completed = counters?.completed?.sum() ?: 0,
+                    failed = counters?.failed?.sum() ?: 0,
+                    cancelled = counters?.cancelled?.sum() ?: 0,
+                    timedOut = counters?.timedOut?.sum() ?: 0,
+                    retries = counters?.retries?.sum() ?: 0,
                     measured = measured,
-                    durationMillis = counters?.durationMillis?.sumThenReset() ?: 0,
-                    duration = if (measured > 0) counters?.timer?.takeSnapshot()?.toDistribution() else null,
+                    durationMillis = counters?.durationMillis?.sum() ?: 0,
+                    duration = if (newlyMeasured) counters?.timer?.takeSnapshot()?.toDistribution() else null,
                     open = open?.let { it[key] ?: 0 },
+                    since = counters?.since ?: startedAt,
             ))
         }
     }
 
-    private fun refreshTrackerInBackground() {
-        if (!refreshing.compareAndSet(false, true)) return
-        refresher.execute {
+    private fun workInBackground() {
+        if (!working.compareAndSet(false, true)) return
+        background.execute {
             try {
-                tracker.refresh()
+                projection.refresh()
+                resolve(unresolved.drain())
             } catch (e: Exception) {
-                logger.debug(e) { "Could not read the open workflow instances from the event store" }
+                logger.debug(e) { "Could not read workflow instances from the event store" }
             } finally {
-                refreshing.set(false)
+                working.set(false)
             }
         }
     }
 
     private fun record(event: EventMessage) {
-        val metadata = event.metadata()
-        val workflowId = metadata[WORKFLOW_ID] ?: return
+        val workflowId = event.metadata()[WORKFLOW_ID] ?: return
         val entry = journalEntryOf(event) ?: return
-        val instance = tracker.instance(workflowId)
-        if (entry.stepName == null) {
-            val definition = metadata[DEFINITION_NAME]?.let { it to metadata[DEFINITION_VERSION].orEmpty() }
-                    ?: instance?.definition ?: return
-            val key = WorkflowStatisticIdentifier(definitionName = definition.first, definitionVersion = definition.second)
-            countOutcome(key, entry.status)
-            if (entry.status in TERMINAL && instance != null) {
-                measure(key, entry.occurredAt - instance.startedAt)
-            }
+        if (entry.stepName == null && entry.status == WorkflowStatus.STARTED.name) {
+            val definition = (event.metadata()[DEFINITION_NAME] ?: return) to event.metadata()[DEFINITION_VERSION].orEmpty()
+            countOutcome(key(definition, null), entry.status)
         } else {
-            if (tracker.hasEnded(workflowId)) return
+            val instance = projection.running(workflowId)
             if (instance == null) {
-                if (event.timestamp().isAfter(Instant.now().minus(MAX_UNRESOLVED_AGE))) {
-                    unresolved.put(event.identifier(), event)
-                }
+                unresolved.put(event.identifier(), event)
                 return
             }
-            recordStep(workflowId, instance, entry)
+            val definition = instance.definitionName to instance.definitionVersion
+            record(workflowId, Instance(definition, instance.startedAt ?: entry.occurredAt, instance.waits), entry, attemptStarts)
         }
-        tracker.apply(event)
+        projection.apply(event)
     }
 
-    private fun recordStep(workflowId: String, instance: WorkflowInstanceTracker.OpenInstance, entry: JournalEntry) {
-        val step = entry.stepName!!
-        val key = WorkflowStatisticIdentifier(
-                definitionName = instance.definition.first,
-                definitionVersion = instance.definition.second,
-                stepName = step,
-        )
+    /**
+     * Reads the instances of events this node could not place, and counts those events where they stand in the
+     * instance's journal. Steps after the instance's end are left out: they are what ending it did to its open steps.
+     */
+    private fun resolve(events: List<EventMessage>) {
+        if (events.isEmpty()) return
+        val byInstance = events.groupBy { it.metadata()[WORKFLOW_ID]!! }
+        byInstance.keys.chunked(SOURCING_BATCH).forEach { batch ->
+            val journals = instances.journals(batch)
+            batch.forEach { workflowId ->
+                val journal = journals[workflowId].orEmpty()
+                val started = journal.firstOrNull { it.entry.stepName == null && it.entry.status == WorkflowStatus.STARTED.name }
+                val definition = started?.definition ?: return@forEach
+                val instance = Instance(definition, started.entry.occurredAt)
+                val starts = BoundedMap<Pair<String, String>, Long>(MAX_PENDING)
+                val pending = byInstance.getValue(workflowId).mapTo(HashSet()) { it.identifier() }
+                var ended = false
+                journal.forEach { recorded ->
+                    val entry = recorded.entry
+                    if (ended && entry.stepName != null) return@forEach
+                    if (recorded.identifier in pending) {
+                        record(workflowId, instance, entry, starts)
+                    } else if (entry.status in ATTEMPT_STARTS && entry.stepName != null) {
+                        starts.put(workflowId to entry.stepName, entry.occurredAt)
+                    }
+                    ended = ended || (entry.stepName == null && entry.status in TERMINAL)
+                }
+            }
+        }
+    }
+
+    private fun record(workflowId: String, instance: Instance, entry: JournalEntry, starts: BoundedMap<Pair<String, String>, Long>) {
+        val step = entry.stepName
+        if (step == null) {
+            val key = key(instance.definition, null)
+            countOutcome(key, entry.status)
+            if (entry.status in TERMINAL && entry.occurredAt >= instance.startedAt) {
+                measure(key, entry.occurredAt - instance.startedAt)
+            }
+            return
+        }
+        val key = key(instance.definition, step)
         val attempt = workflowId to step
         when (entry.status) {
-            "STARTED", "RETRY_STARTED" -> {
+            in ATTEMPT_STARTS -> {
                 countOutcome(key, entry.status)
-                attemptStarts.put(attempt, entry.occurredAt)
+                starts.put(attempt, entry.occurredAt)
             }
             in ATTEMPT_ENDS -> {
                 countOutcome(key, entry.status)
-                val start = attemptStarts.remove(attempt) ?: instance.waits[step]
+                val start = starts.remove(attempt) ?: instance.waits[step]
                 if (start != null && entry.occurredAt >= start) {
                     measure(key, entry.occurredAt - start)
                 }
             }
         }
     }
+
+    private fun key(definition: Pair<String, String>, step: String?) =
+            WorkflowStatisticIdentifier(definitionName = definition.first, definitionVersion = definition.second, stepName = step)
 
     private fun countOutcome(key: WorkflowStatisticIdentifier, status: String) {
         val counters = statistics.computeIfAbsent(key) { Counters(createTimer(meterRegistry, "${it}_timer")) }
@@ -155,7 +195,11 @@ class WorkflowMetricsRegistry(configuration: Configuration) : WorkflowStatistics
         counters.durationMillis.add(millis)
     }
 
+    private class Instance(val definition: Pair<String, String>, val startedAt: Long, val waits: Map<String, Long> = emptyMap())
+
     private class Counters(val timer: Timer) {
+        /** When this node began counting the workflow or step, which is at its first event, not at startup. */
+        val since = Instant.now().epochSecond
         val started = LongAdder()
         val completed = LongAdder()
         val failed = LongAdder()
@@ -164,87 +208,32 @@ class WorkflowMetricsRegistry(configuration: Configuration) : WorkflowStatistics
         val retries = LongAdder()
         val measured = LongAdder()
         val durationMillis = LongAdder()
+        val reportedMeasured = AtomicLong()
     }
 
     private companion object {
         const val MAX_PENDING = 100_000
-        val MAX_UNRESOLVED_AGE: Duration = Duration.ofMinutes(10)
+        const val SOURCING_BATCH = 100
         val TERMINAL = setOf("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT")
+        val ATTEMPT_STARTS = setOf("STARTED", "RETRY_STARTED")
         val ATTEMPT_ENDS = TERMINAL + "RETRYING"
     }
 }
 
-/**
- * The workflow instances that have not ended, with their definition, start and open waits, read from the lifecycle
- * and wait events the engine tags. Every node reads the same events, so every node knows every open instance,
- * wherever it started. Ended instances are forgotten, except for their ids, briefly, so that events arriving after
- * an instance's end are recognised as such.
- */
-internal class WorkflowInstanceTracker(configuration: Configuration) {
-    private val events = IncrementalSource(configuration, EventCriteria.either(LIFECYCLE, WAITS))
-    private val open = ConcurrentHashMap<String, OpenInstance>()
-    private val ended = BoundedMap<String, Unit>(MAX_ENDED)
+/** The events of given instances, read by the workflow id the engine tags every one of them with. */
+private class InstanceSource(private val configuration: Configuration) {
 
-    @Volatile
-    private var ready = false
+    class Recorded(val identifier: String, val entry: JournalEntry, val definition: Pair<String, String>?)
 
-    class OpenInstance(val definition: Pair<String, String>, val startedAt: Long) {
-        /** Wait-for-event steps whose latest event is their start, with that start. */
-        val waits = ConcurrentHashMap<String, Long>()
-    }
-
-    @Synchronized
-    fun refresh() {
-        events.read { apply(it) }
-        ready = true
-    }
-
-    fun instance(workflowId: String): OpenInstance? = open[workflowId]
-
-    fun hasEnded(workflowId: String) = ended.contains(workflowId)
-
-    /** Open instances per definition version and waiting instances per wait step; null until first read. */
-    fun openCounts(): Map<WorkflowStatisticIdentifier, Long>? {
-        if (!ready) return null
-        val counts = HashMap<WorkflowStatisticIdentifier, Long>()
-        open.values.forEach { instance ->
-            val (name, version) = instance.definition
-            counts.merge(WorkflowStatisticIdentifier(definitionName = name, definitionVersion = version), 1, Long::plus)
-            instance.waits.keys.forEach { step ->
-                counts.merge(WorkflowStatisticIdentifier(definitionName = name, definitionVersion = version, stepName = step), 1, Long::plus)
-            }
-        }
-        return counts
-    }
-
-    /** Applying an event twice, or a start after its instance ended, leaves the state as it was. */
-    fun apply(event: EventMessage) {
-        val metadata = event.metadata()
-        val workflowId = metadata[WORKFLOW_ID] ?: return
-        val lifecycle = metadata[WORKFLOW_STATUS]?.let { runCatching { WorkflowStatus.valueOf(it) }.getOrNull() }
-        when {
-            lifecycle == WorkflowStatus.STARTED -> if (!ended.contains(workflowId)) {
-                val definition = (metadata[DEFINITION_NAME] ?: return) to metadata[DEFINITION_VERSION].orEmpty()
-                open.putIfAbsent(workflowId, OpenInstance(definition, event.timestamp().toEpochMilli()))
-            }
-            lifecycle != null && lifecycle.isTerminal -> {
-                ended.put(workflowId, Unit)
-                open.remove(workflowId)
-            }
-            lifecycle == null && metadata[STEP_PRIMITIVE] == WAIT_FOR_EVENT -> {
-                val step = metadata[STEP_NAME] ?: return
-                val instance = open[workflowId] ?: return
-                if (metadata[STEP_TYPE] == "STARTED") {
-                    instance.waits[step] = event.timestamp().toEpochMilli()
-                } else {
-                    instance.waits.remove(step)
+    fun journals(workflowIds: List<String>): Map<String, List<Recorded>> {
+        val eventStore = configuration.getOptionalComponent(EventStore::class.java).orElse(null) ?: return emptyMap()
+        return sourceEvents(configuration, eventStore, EventCriteria.either(workflowIds.map { EventSourcedWorkflowState.criteriaBuilder(it) }))
+                .mapNotNull { event ->
+                    val entry = journalEntryOf(event) ?: return@mapNotNull null
+                    val definition = event.metadata()[DEFINITION_NAME]?.let { it to event.metadata()[DEFINITION_VERSION].orEmpty() }
+                    event.metadata()[WORKFLOW_ID]?.let { it to Recorded(event.identifier(), entry, definition) }
                 }
-            }
-        }
-    }
-
-    private companion object {
-        const val MAX_ENDED = 100_000
+                .groupBy({ it.first }, { it.second })
     }
 }
 

@@ -11,33 +11,188 @@ package io.axoniq.platform.framework.workflow
 import io.axoniq.framework.workflow.dsl.api.WorkflowStatus
 import io.axoniq.framework.workflow.runtime.execution.EventSourcedRunningWorkflows
 import io.axoniq.framework.workflow.runtime.execution.WorkflowEventTags
+import io.axoniq.platform.framework.AxoniqPlatformConfiguration
 import io.axoniq.platform.framework.api.WorkflowExecutionSummary
+import io.axoniq.platform.framework.api.metrics.WorkflowStatisticIdentifier
+import io.github.oshai.kotlinlogging.KotlinLogging
 import org.axonframework.common.configuration.Configuration
 import org.axonframework.eventsourcing.eventstore.EventStore
 import org.axonframework.eventsourcing.eventstore.GlobalIndexPosition
 import org.axonframework.eventsourcing.eventstore.Position
 import org.axonframework.eventsourcing.eventstore.SourcingCondition
+import org.axonframework.eventsourcing.snapshot.api.Snapshot
+import org.axonframework.eventsourcing.snapshot.store.SnapshotStore
+import org.axonframework.messaging.core.QualifiedName
 import org.axonframework.messaging.core.unitofwork.UnitOfWorkFactory
 import org.axonframework.messaging.eventhandling.EventMessage
 import org.axonframework.messaging.eventhandling.processing.streaming.token.GlobalSequenceTrackingToken
 import org.axonframework.messaging.eventhandling.processing.streaming.token.TrackingToken
 import org.axonframework.messaging.eventstreaming.EventCriteria
 import org.axonframework.messaging.eventstreaming.Tag
+import tools.jackson.dataformat.cbor.CBORMapper
+import tools.jackson.module.kotlin.KotlinModule
+import tools.jackson.module.kotlin.readValue
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.time.Duration
+import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
 
 /**
- * The start and end of every workflow instance the application ran, kept in memory and brought up to date on every
- * read with the lifecycle events appended since the previous read.
+ * The workflow instances of this application, kept in memory from the lifecycle and wait events the engine tags:
+ * every running instance with its open waits, and the finished ones within the retention, up to a maximum. The list
+ * of executions and the open counts of the statistics report both read it, so the events are read once per node.
+ *
+ * A [refresh] reads the events appended since the previous one. The first one starts from the snapshot the nodes of
+ * the application store in the [SnapshotStore] every few minutes, so the full history is read once, not at every
+ * boot; without a snapshot store it starts from the beginning. Events this node appends are applied right away as
+ * well, so its own instances are known before the next refresh. Instances of workflows this application does not
+ * define are left out: applications that share an event store see each other's events.
  */
-internal class WorkflowExecutionsProjection(configuration: Configuration) {
-    private val lifecycleEvents = IncrementalSource(configuration, LIFECYCLE)
-    private val instances = LinkedHashMap<String, WorkflowInstance>()
+internal class WorkflowExecutionsProjection(
+        private val configuration: Configuration,
+        retention: Duration? = null,
+        maxFinished: Int? = null,
+        private val definitionNames: () -> Set<String>,
+) {
+    private val logger = KotlinLogging.logger { }
+    private val events = IncrementalSource(configuration, EventCriteria.either(LIFECYCLE, WAITS))
+    private val instances = ConcurrentHashMap<String, WorkflowInstance>()
+    private val settings = configuration.getOptionalComponent(AxoniqPlatformConfiguration::class.java).orElse(null)
+    private val retention = retention ?: settings?.workflowRetention ?: Duration.ofDays(30)
+    private val maxFinished = maxFinished ?: settings?.workflowMaxFinishedExecutions ?: 10_000
+    private val snapshotName = settings?.applicationName ?: "application"
+    private var restored = false
+    private var lastSnapshotAt = Instant.EPOCH
+    private var changedSinceSnapshot = false
+
+    @Volatile
+    private var ready = false
 
     @Synchronized
-    fun <T> read(read: (Collection<WorkflowInstance>) -> T): T {
-        lifecycleEvents.read { event ->
-            event.metadata()[WORKFLOW_ID]?.let { instances.getOrPut(it) { WorkflowInstance(it) }.apply(event) }
+    fun refresh() {
+        if (!restored) {
+            restore()
+            restored = true
         }
+        if (events.read { apply(it) } > 0) changedSinceSnapshot = true
+        prune()
+        ready = true
+        if (changedSinceSnapshot && Instant.now().isAfter(lastSnapshotAt.plus(SNAPSHOT_INTERVAL))) {
+            storeSnapshot()
+        }
+    }
+
+    fun <T> read(read: (Collection<WorkflowInstance>) -> T): T {
+        refresh()
         return read(instances.values)
+    }
+
+    /** A running instance, or null when this node does not know it as running. */
+    fun running(workflowId: String): WorkflowInstance? = instances[workflowId]?.takeIf { it.isRunning() }
+
+    /** Open instances per definition version and waiting instances per wait step; null until the first refresh. */
+    fun openCounts(): Map<WorkflowStatisticIdentifier, Long>? {
+        if (!ready) return null
+        val counts = HashMap<WorkflowStatisticIdentifier, Long>()
+        instances.values.filter { it.isRunning() }.forEach { instance ->
+            val name = instance.definitionName
+            val version = instance.definitionVersion
+            counts.merge(WorkflowStatisticIdentifier(definitionName = name, definitionVersion = version), 1, Long::plus)
+            instance.waits.keys.forEach { step ->
+                counts.merge(WorkflowStatisticIdentifier(definitionName = name, definitionVersion = version, stepName = step), 1, Long::plus)
+            }
+        }
+        return counts
+    }
+
+    fun apply(event: EventMessage) {
+        val workflowId = event.metadata()[WORKFLOW_ID] ?: return
+        val instance = instances[workflowId] ?: run {
+            val name = event.metadata()[DEFINITION_NAME] ?: return
+            if (event.metadata()[WORKFLOW_STATUS] != WorkflowStatus.STARTED.name) return
+            if (!definedHere(name)) return
+            instances.computeIfAbsent(workflowId) { WorkflowInstance(it) }
+        }
+        instance.apply(event)
+    }
+
+    private fun definedHere(name: String) = definitionNames().let { it.isEmpty() || name in it }
+
+    /** Drops what ended before the retention, then the oldest finished beyond the maximum. */
+    private fun prune() {
+        val retainedFrom = Instant.now().minus(retention).toEpochMilli()
+        instances.values.removeIf { it.finishedAt?.let { finished -> finished < retainedFrom } == true }
+        val finished = instances.values.filter { it.finishedAt != null }
+        if (finished.size > maxFinished) {
+            finished.sortedBy { it.finishedAt }.take(finished.size - maxFinished).forEach { instances.remove(it.workflowId) }
+        }
+    }
+
+    private fun restore() {
+        val store = configuration.getOptionalComponent(SnapshotStore::class.java).orElse(null) ?: return
+        try {
+            val snapshot = store.load(SNAPSHOT_NAME, snapshotName, null).get(SNAPSHOT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    ?.takeIf { it.version == SNAPSHOT_VERSION } ?: return
+            val payload = GZIPInputStream(ByteArrayInputStream(snapshot.payload() as ByteArray)).use { mapper.readValue<SnapshotPayload>(it) }
+            payload.instances.filter { definedHere(it.name) }.forEach { instances[it.id] = it.toInstance() }
+            events.position = snapshot.position()
+            logger.debug { "Restored ${payload.instances.size} workflow executions from the snapshot at ${snapshot.position()}" }
+        } catch (e: Exception) {
+            logger.debug(e) { "Could not restore the workflow executions from a snapshot; reading them from the event store" }
+            instances.clear()
+            events.position = Position.START
+        }
+    }
+
+    private fun storeSnapshot() {
+        val store = configuration.getOptionalComponent(SnapshotStore::class.java).orElse(null) ?: return
+        val bytes = ByteArrayOutputStream().also { out ->
+            GZIPOutputStream(out).use { mapper.writeValue(it, SnapshotPayload(instances.values.map { instance -> instance.toSnapshot() })) }
+        }.toByteArray()
+        store.store(SNAPSHOT_NAME, snapshotName, Snapshot(events.position, SNAPSHOT_VERSION, bytes, Instant.now(), emptyMap()), null)
+                .whenComplete { _, e -> if (e != null) logger.debug(e) { "Could not store the workflow executions snapshot" } }
+        lastSnapshotAt = Instant.now()
+        changedSinceSnapshot = false
+    }
+
+    private data class SnapshotPayload(val instances: List<SnapshotInstance>)
+
+    private data class SnapshotInstance(
+            val id: String,
+            val name: String,
+            val version: String,
+            val status: String,
+            val startedAt: Long?,
+            val finishedAt: Long?,
+            val lastEventAt: Long,
+            val waits: Map<String, Long>,
+    ) {
+        fun toInstance() = WorkflowInstance(id).also {
+            it.definitionName = name
+            it.definitionVersion = version
+            it.status = status
+            it.startedAt = startedAt
+            it.finishedAt = finishedAt
+            it.lastEventAt = lastEventAt
+            it.waits.putAll(waits)
+        }
+    }
+
+    private fun WorkflowInstance.toSnapshot() = SnapshotInstance(
+            id = workflowId, name = definitionName, version = definitionVersion, status = status,
+            startedAt = startedAt, finishedAt = finishedAt, lastEventAt = lastEventAt, waits = HashMap(waits),
+    )
+
+    private companion object {
+        val SNAPSHOT_NAME = QualifiedName("io.axoniq.platform.WorkflowExecutions")
+        const val SNAPSHOT_VERSION = "1"
+        const val SNAPSHOT_TIMEOUT_SECONDS = 30L
+        val SNAPSHOT_INTERVAL: Duration = Duration.ofMinutes(5)
+        val mapper: CBORMapper = CBORMapper.builder().addModule(KotlinModule.Builder().build()).build()
     }
 }
 
@@ -48,16 +203,19 @@ internal class WorkflowExecutionsProjection(configuration: Configuration) {
  * appends that position can lie past events that were not visible yet, which would then never be read.
  */
 internal class IncrementalSource(private val configuration: Configuration, private val criteria: EventCriteria) {
-    private var position: Position = Position.START
+    var position: Position = Position.START
 
-    fun read(consumer: (EventMessage) -> Unit) {
-        val eventStore = configuration.getOptionalComponent(EventStore::class.java).orElse(null) ?: return
+    /** Reads the new events, returning how many there were. */
+    fun read(consumer: (EventMessage) -> Unit): Int {
+        val eventStore = configuration.getOptionalComponent(EventStore::class.java).orElse(null) ?: return 0
         var next: Position? = null
+        var count = 0
         configuration.getComponent(UnitOfWorkFactory::class.java).create().executeWithResult { context ->
             eventStore.transaction(context)
                     .source(SourcingCondition.conditionFor(position, criteria))
                     .reduce(Unit) { _, entry ->
                         consumer(entry.message())
+                        count++
                         TrackingToken.fromContext(entry)
                                 .map { (it as? GlobalSequenceTrackingToken)?.globalIndex }
                                 .ifPresent { next = GlobalIndexPosition(it) }
@@ -65,29 +223,47 @@ internal class IncrementalSource(private val configuration: Configuration, priva
                     .thenApply { true }
         }.get()
         next?.let { position = it }
+        return count
     }
 }
 
-/** One instance as its start and end events record it. */
+/** One instance as its start and end events record it, with the wait-for-event steps it waits at. */
 internal class WorkflowInstance(val workflowId: String) {
-    var definitionName = ""
-    var definitionVersion = ""
-    var status = WorkflowStatus.NONE.name
-    var startedAt: Long? = null
-    var finishedAt: Long? = null
-    var lastEventAt = 0L
+    @Volatile var definitionName = ""
+    @Volatile var definitionVersion = ""
+    @Volatile var status = WorkflowStatus.NONE.name
+    @Volatile var startedAt: Long? = null
+    @Volatile var finishedAt: Long? = null
+    @Volatile var lastEventAt = 0L
 
+    /** Wait-for-event steps whose latest event is their start, with that start. */
+    val waits = ConcurrentHashMap<String, Long>()
+
+    fun isRunning() = status == WorkflowStatus.STARTED.name
+
+    /** Applying an event twice, or a start after the end, leaves the instance as it was. */
+    @Synchronized
     fun apply(event: EventMessage) {
         val metadata = event.metadata()
-        val lifecycle = metadata[WORKFLOW_STATUS]?.let { runCatching { WorkflowStatus.valueOf(it) }.getOrNull() } ?: return
         val occurredAt = event.timestamp().toEpochMilli()
-        metadata[DEFINITION_NAME]?.let { definitionName = it }
-        metadata[DEFINITION_VERSION]?.let { definitionVersion = it }
+        val lifecycle = metadata[WORKFLOW_STATUS]?.let { runCatching { WorkflowStatus.valueOf(it) }.getOrNull() }
+        if (lifecycle == null) {
+            val step = metadata[STEP_NAME] ?: return
+            if (metadata[STEP_PRIMITIVE] != WAIT_FOR_EVENT || !isRunning()) return
+            if (metadata[STEP_TYPE] == "STARTED") waits[step] = occurredAt else waits.remove(step)
+            return
+        }
+        if (lifecycle == WorkflowStatus.STARTED && finishedAt != null) return
+        metadata[DEFINITION_NAME]?.let { if (definitionName.isEmpty()) definitionName = it }
+        metadata[DEFINITION_VERSION]?.let { if (definitionVersion.isEmpty()) definitionVersion = it }
         status = lifecycle.name
         lastEventAt = maxOf(lastEventAt, occurredAt)
         when {
             lifecycle == WorkflowStatus.STARTED -> startedAt = occurredAt
-            lifecycle.isTerminal -> finishedAt = occurredAt
+            lifecycle.isTerminal -> {
+                finishedAt = occurredAt
+                waits.clear()
+            }
         }
     }
 

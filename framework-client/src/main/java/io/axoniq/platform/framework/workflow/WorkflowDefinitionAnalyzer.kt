@@ -70,7 +70,7 @@ internal class WorkflowDefinitionAnalyzer(
             builder.edge(start, end)
         } else {
             body.entries.forEach { builder.edge(start, it.target, it.kind) }
-            body.exits.forEach { builder.edge(it, end) }
+            body.exits.forEach { builder.edge(it.target, end, it.kind) }
             if (body.passesThrough) builder.edge(start, end)
         }
         builder.insertExclusiveGateways()
@@ -80,12 +80,12 @@ internal class WorkflowDefinitionAnalyzer(
     }
 
     /**
-     * A method's part of the graph: where its flow starts, which of its nodes hand control back to the caller, whether
+     * A method's part of the graph: where its flow starts, which of its nodes hand control back to the caller and how, whether
      * some path through it reaches a return without passing any step, and the step nodes whose results it returns.
      */
     private class Fragment(
             val entries: List<Link>,
-            val exits: List<String>,
+            val exits: List<Link>,
             val passesThrough: Boolean,
             val returned: Set<String>,
     )
@@ -141,7 +141,7 @@ internal class WorkflowDefinitionAnalyzer(
         val calls = HashMap<Int, Fragment>()
         val combinators = HashSet<String>()
         val origins = { value: SourceValue ->
-            value.insns.flatMapTo(LinkedHashSet()) { insn ->
+            value.insns.sortedWith(compareBy({ indexOf[it] ?: -1 }, { cfg.parameters[it] ?: -1 })).flatMapTo(LinkedHashSet()) { insn ->
                 cfg.parameters[insn]?.let { parameters[it] }
                         ?: indexOf[insn]?.let { index -> ids[index]?.let(::setOf) ?: calls[index]?.returned }
                         ?: emptySet()
@@ -185,13 +185,13 @@ internal class WorkflowDefinitionAnalyzer(
         val flow = MethodFlow(cfg, marks, ids, calls)
         marks.values.forEach { mark ->
             if (mark is TerminalMark || mark is ReturnMark) return@forEach
-            val sources = ids[mark.index]?.let { listOf(it) } ?: calls[mark.index]?.exits ?: return@forEach
+            val sources = ids[mark.index]?.let { listOf(Link(it)) } ?: calls[mark.index]?.exits ?: return@forEach
             val withExceptions = mark !is CallMark
             flow.next(mark.index, withExceptions).forEach { link ->
-                sources.forEach { from -> builder.edge(from, link.target, link.kind) }
+                sources.forEach { from -> builder.edge(from.target, link.target, from.kind.or(link.kind)) }
             }
         }
-        val exits = marks.values.filterIsInstance<ReturnMark>().flatMap { flow.exitsBefore(it.index) }.distinct()
+        val exits = marks.values.filterIsInstance<ReturnMark>().flatMap { flow.exitsBefore(it.index) }.distinctBy { it.target }
         return Fragment(flow.next(-1, false), exits, flow.reachesReturn(-1), returned)
     }
 
@@ -255,26 +255,35 @@ internal class WorkflowDefinitionAnalyzer(
             return result.map { Link(it.key, it.value) }
         }
 
-        fun reachesReturn(from: Int): Boolean = reachedMarks(from, false).any { (index, _) ->
-            marks[index] is ReturnMark || (calls[index]?.passesThrough == true && reachesReturn(index))
-        }
+        fun reachesReturn(from: Int, seen: MutableSet<Int> = HashSet()): Boolean = seen.add(from) &&
+                reachedMarks(from, false).any { (index, _) ->
+                    marks[index] is ReturnMark || (calls[index]?.passesThrough == true && reachesReturn(index, seen))
+                }
 
-        /** The nodes that hand control to the return at [returnIndex]. */
-        fun exitsBefore(returnIndex: Int): List<String> {
-            val result = mutableListOf<String>()
+        /**
+         * The nodes that hand control to the return at [returnIndex]. A step whose exception handler leads to the
+         * return without passing another step leaves by an error edge, like a catch block that only returns.
+         */
+        fun exitsBefore(returnIndex: Int): List<Link> {
+            val result = mutableListOf<Link>()
             val seen = HashSet<Int>()
             val queue = ArrayDeque(cfg.predecessors[returnIndex])
             while (queue.isNotEmpty()) {
                 val current = queue.removeFirst()
                 if (!seen.add(current)) continue
                 when (val mark = marks[current]) {
-                    null, is ReturnMark -> queue.addAll(cfg.predecessors[current])
+                    null, is ReturnMark -> {
+                        queue.addAll(cfg.predecessors[current])
+                        cfg.exceptionPredecessors[current].forEach { thrower ->
+                            if (marks[thrower] !is CallMark) ids[thrower]?.let { result += Link(it, WorkflowGraphEdgeKind.ERROR) }
+                        }
+                    }
                     is TerminalMark -> {}
                     is CallMark -> {
-                        calls[current]?.let { result += it.exits } ?: ids[current]?.let { result += it }
+                        calls[current]?.let { result += it.exits } ?: ids[current]?.let { result += Link(it) }
                         if (calls[current]?.passesThrough == true) queue.addAll(cfg.predecessors[current])
                     }
-                    else -> ids[mark.index]?.let { result += it }
+                    else -> ids[mark.index]?.let { result += Link(it) }
                 }
             }
             return result
@@ -463,6 +472,7 @@ internal class WorkflowDefinitionAnalyzer(
         val successors = Array(size) { mutableListOf<Int>() }
         val exceptionSuccessors = Array(size) { mutableListOf<Int>() }
         val predecessors = Array(size) { mutableListOf<Int>() }
+        val exceptionPredecessors = Array(size) { mutableListOf<Int>() }
         val parameters = HashMap<AbstractInsnNode, Int>()
         val frames: Array<Frame<SourceValue>?>
         val analyzed: Boolean
@@ -476,6 +486,7 @@ internal class WorkflowDefinitionAnalyzer(
 
                 override fun newControlFlowExceptionEdge(insnIndex: Int, successorIndex: Int): Boolean {
                     exceptionSuccessors[insnIndex] += successorIndex
+                    exceptionPredecessors[successorIndex] += insnIndex
                     return true
                 }
             }
@@ -652,12 +663,13 @@ internal class GraphBuilder {
     fun insertExclusiveGateways() {
         nodes.values.toList().forEach { node ->
             if (node.kind == WorkflowGraphNodeKind.PARALLEL_FORK || node.kind == WorkflowGraphNodeKind.EXCLUSIVE_GATEWAY) return@forEach
-            val outgoing = edges.filter { it.from == node.id && it.kind != WorkflowGraphEdgeKind.ERROR }
-            if (outgoing.size < 2) return@forEach
-            val gateway = node(WorkflowGraphNodeKind.EXCLUSIVE_GATEWAY)
-            edges -= outgoing.toSet()
-            edge(node.id, gateway)
-            outgoing.forEach { edge(gateway, it.to, it.kind) }
+            edges.filter { it.from == node.id }.groupBy { it.kind == WorkflowGraphEdgeKind.ERROR }.forEach { (error, outgoing) ->
+                if (outgoing.size < 2) return@forEach
+                val gateway = node(WorkflowGraphNodeKind.EXCLUSIVE_GATEWAY)
+                edges -= outgoing.toSet()
+                edge(node.id, gateway, if (error) WorkflowGraphEdgeKind.ERROR else WorkflowGraphEdgeKind.NORMAL)
+                outgoing.forEach { edge(gateway, it.to, if (error) WorkflowGraphEdgeKind.NORMAL else it.kind) }
+            }
         }
     }
 
@@ -675,3 +687,6 @@ internal class GraphBuilder {
 
     fun build() = WorkflowGraph(nodes.values.toList(), edges.toList())
 }
+
+private fun WorkflowGraphEdgeKind.or(other: WorkflowGraphEdgeKind) =
+        if (this == WorkflowGraphEdgeKind.NORMAL) other else this

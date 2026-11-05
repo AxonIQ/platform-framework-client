@@ -85,7 +85,7 @@ object Routes {
     }
 
     object Workflow {
-        const val DEFINITIONS = "workflow-definitions"
+        const val DEFINITIONS_REPORT = "workflow-definitions-report"
         const val EXECUTIONS = "workflow-executions"
         const val EXECUTION = "workflow-execution"
         const val EXECUTION_EVENTS = "workflow-execution-events"

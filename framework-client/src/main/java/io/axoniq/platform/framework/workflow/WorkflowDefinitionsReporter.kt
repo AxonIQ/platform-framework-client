@@ -14,28 +14,67 @@ import io.axoniq.platform.framework.api.Routes
 import io.axoniq.platform.framework.api.WorkflowDefinitionDescription
 import io.axoniq.platform.framework.api.WorkflowDefinitionsResult
 import io.axoniq.platform.framework.api.WorkflowGraph
-import io.axoniq.platform.framework.client.RSocketHandlerRegistrar
+import io.axoniq.platform.framework.api.ClientSettingsV2
+import io.axoniq.platform.framework.api.ClientStatus
+import io.axoniq.platform.framework.client.AxoniqConsoleRSocketClient
+import io.axoniq.platform.framework.client.PlatformClientConnectionObserver
+import io.axoniq.platform.framework.client.PlatformClientConnectionService
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Answers [Routes.Workflow.DEFINITIONS] with every workflow definition registered in the application and the graph
- * read from its code. The graph of a definition is read once, the first time it is asked for; a definition's code
- * does not change while the application runs.
+ * Reports every workflow definition registered in the application, with the graph read from its code, on
+ * [Routes.Workflow.DEFINITIONS_REPORT] once per connection, so Inspector knows them per node without asking. The
+ * analysis runs in the background, so connecting does not wait for it. The graph of a definition is read once; a
+ * definition's code does not change while the application runs.
  */
-class WorkflowDefinitionsResponder(private val registrar: RSocketHandlerRegistrar) {
+class WorkflowDefinitionsReporter(
+        private val client: AxoniqConsoleRSocketClient,
+        private val connectionService: PlatformClientConnectionService,
+) : PlatformClientConnectionObserver {
     private val logger = KotlinLogging.logger { }
     private val registries = CopyOnWriteArraySet<WorkflowConfigurationRegistry<*>>()
     private val descriptions = ConcurrentHashMap<WorkflowConfiguration<*>, WorkflowDefinitionDescription>()
+    private val reported = AtomicInteger(-1)
+    private val executor = Executors.newSingleThreadExecutor { Thread(it, "axoniq-platform-workflow-definitions").apply { isDaemon = true } }
 
     fun registerRegistry(registry: WorkflowConfigurationRegistry<*>) {
         registries += registry
     }
 
     fun start() {
-        registrar.registerHandlerWithoutPayload(Routes.Workflow.DEFINITIONS) { definitions() }
+        connectionService.subscribeToSettings(this)
+    }
+
+    override fun onConnected(clientStatus: ClientStatus, settings: ClientSettingsV2) {
+        val connection = client.connectionNumber()
+        if (!clientStatus.enabled || reported.getAndSet(connection) == connection) return
+        executor.execute {
+            try {
+                client.sendReport(Routes.Workflow.DEFINITIONS_REPORT, definitions())
+                        .doOnError { e ->
+                            reported.compareAndSet(connection, -1)
+                            logger.debug { "Failed to report the workflow definitions: ${e.message}" }
+                        }
+                        .onErrorComplete()
+                        .subscribe()
+            } catch (e: Exception) {
+                reported.compareAndSet(connection, -1)
+                logger.debug(e) { "Could not report the workflow definitions" }
+            }
+        }
+    }
+
+    override fun onDisconnected() {
+    }
+
+    /** The names of the workflows this application defines, without reading their code. */
+    fun definitionNames(): Set<String> = registries.flatMapTo(HashSet()) { registry ->
+        registry.supportedEvents().flatMap { event -> registry.getWorkflowsConfigurations(event).map { it.configuration().workflowName() } }
     }
 
     fun definitions(): WorkflowDefinitionsResult {
@@ -56,22 +95,24 @@ class WorkflowDefinitionsResponder(private val registrar: RSocketHandlerRegistra
         val name = configuration.workflowName()
         val version = configuration.workflowVersion()
         val warnings = mutableListOf<String>()
-        val result = try {
+        // Throwable, because a definition the analysis cannot handle must not take the other definitions down with it.
+        val read = try {
             WorkflowDefinitionLocator.locate(configuration.workflowDefinition(), name, warnings)
                     ?.let { WorkflowDefinitionAnalyzer(it.classLoader).analyze(it.method) }
-        } catch (e: Exception) {
+                    ?.let { result -> result to WorkflowBpmnWriter.write(name, version, result.graph) }
+        } catch (e: Throwable) {
             logger.debug(e) { "Could not read the graph of workflow $name $version" }
-            warnings += "Could not read the graph: ${e.message}"
+            warnings += "Could not read the graph: ${e.message ?: e.javaClass.simpleName}"
             null
         }
-        val graph = result?.graph
+        val graph = read?.first?.graph
         return WorkflowDefinitionDescription(
                 name = name,
                 version = version,
                 startEvents = startEvents,
                 graph = graph,
-                bpmnXml = graph?.let { WorkflowBpmnWriter.write(name, version, it) },
-                warnings = warnings + (result?.warnings ?: emptyList()),
+                bpmnXml = read?.second,
+                warnings = warnings + (read?.first?.warnings ?: emptyList()),
                 fingerprint = graph?.let(::fingerprint),
         )
     }

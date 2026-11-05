@@ -31,16 +31,15 @@ import org.axonframework.messaging.eventhandling.conversion.EventConverter
  * application's event store, when asked. Workflow metrics travel in the statistics report instead, see
  * [WorkflowMetricsRegistry].
  *
- * The list comes from a [WorkflowExecutionsProjection] that each request brings up to date with the lifecycle events
- * appended since the previous one. One execution and its journal are read from that execution's own events,
- * which the engine tags with its workflow id, so they show its payloads and stay cheap to poll.
+ * The list comes from the [WorkflowExecutionsProjection], which each request brings up to date. One execution and its
+ * journal are read from that execution's own events, which the engine tags with its workflow id, so they show its
+ * payloads and stay cheap to poll.
  */
-class WorkflowExecutionsResponder(
+internal class WorkflowExecutionsResponder(
         private val registrar: RSocketHandlerRegistrar,
         private val configuration: Configuration,
+        private val projection: WorkflowExecutionsProjection,
 ) {
-    private val projection = WorkflowExecutionsProjection(configuration)
-
     fun start() {
         registrar.registerHandlerWithPayload(Routes.Workflow.EXECUTIONS, WorkflowExecutionsQuery::class.java) { executions(it) }
         registrar.registerHandlerWithPayload(Routes.Workflow.EXECUTION, WorkflowExecutionQuery::class.java) { execution(it) }

@@ -174,6 +174,37 @@ class WorkflowDefinitionAnalyzerTest {
     }
 
     @Nested
+    inner class LoopsAndErrorPaths {
+
+        @Test
+        fun `a loop around a helper that can skip its steps is read`() {
+            val graph = analyzer.analyze(javaMethod("loopAroundOptionalHelper")).graph
+
+            assertEquals(setOf("notified", "afterLoop"), graph.nodes.filter { it.kind == WorkflowGraphNodeKind.STEP }.map { it.name }.toSet())
+        }
+
+        @Test
+        fun `a catch block that only returns leads on by an error edge`() {
+            val graph = analyzer.analyze(javaMethod("cardUpdate")).graph
+            val wait = graph.step("awaitCardUpdate")
+
+            val error = graph.edges.single { it.from == wait.id && it.kind == WorkflowGraphEdgeKind.ERROR }
+            val afterError = graph.nodes.single { it.id == error.to }
+            val branches = if (afterError.kind == WorkflowGraphNodeKind.EXCLUSIVE_GATEWAY) graph.next(afterError) else listOf(afterError)
+            assertTrue(branches.any { it.name == "downgrade" }, branches.toString())
+        }
+
+        @Test
+        fun `the same code always gives the same graph`() {
+            val first = WorkflowDefinitionAnalyzer(javaClass.classLoader).analyze(javaMethod("threeWaysToPay")).graph
+
+            repeat(30) {
+                assertEquals(first, WorkflowDefinitionAnalyzer(javaClass.classLoader).analyze(javaMethod("threeWaysToPay")).graph)
+            }
+        }
+    }
+
+    @Nested
     inner class LocatingTheCode {
 
         private fun analyze(definition: Any, name: String): AnalysisResult {
@@ -233,7 +264,7 @@ class WorkflowDefinitionAnalyzerTest {
 
         @Test
         fun `no flow runs through an element other than its own ends`() {
-            listOf("orderFulfilment", "paymentAcrossHelpers").forEach { method ->
+            listOf("orderFulfilment", "paymentAcrossHelpers", "cardUpdate", "retryThroughCatch").forEach { method ->
                 val bpmn = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }.newDocumentBuilder()
                         .parse(WorkflowBpmnWriter.write(method, "1", analyzer.analyze(javaMethod(method)).graph).byteInputStream())
                 val all = { name: String -> bpmn.getElementsByTagNameNS("*", name).let { list -> (0 until list.length).map { list.item(it) as Element } } }
@@ -259,6 +290,21 @@ class WorkflowDefinitionAnalyzerTest {
                     }
                 }
             }
+        }
+
+        @Test
+        fun `a retry through a catch block keeps the steps after it in their own columns`() {
+            val bpmn = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }.newDocumentBuilder()
+                    .parse(WorkflowBpmnWriter.write("retryThroughCatch", "1", analyzer.analyze(javaMethod("retryThroughCatch")).graph).byteInputStream())
+            val names = bpmn.getElementsByTagNameNS("*", "*").let { list -> (0 until list.length).map { list.item(it) as Element } }
+                    .filter { it.hasAttribute("name") }.associate { it.getAttribute("id") to it.getAttribute("name") }
+            val x = bpmn.getElementsByTagNameNS("*", "BPMNShape").let { list -> (0 until list.length).map { list.item(it) as Element } }
+                    .associate { shape ->
+                        names[shape.getAttribute("bpmnElement")] to (shape.getElementsByTagNameNS("*", "Bounds").item(0) as Element).getAttribute("x").toInt()
+                    }
+
+            assertTrue(x.getValue("charge") < x.getValue("charged"), x.toString())
+            assertTrue(x.getValue("charged") < x.getValue("ship"), x.toString())
         }
 
         @Test

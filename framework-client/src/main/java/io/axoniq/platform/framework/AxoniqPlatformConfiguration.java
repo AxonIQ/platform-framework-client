@@ -13,6 +13,7 @@ import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode;
 import org.axonframework.common.BuilderUtils;
 
 import java.lang.management.ManagementFactory;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -44,6 +45,8 @@ public class AxoniqPlatformConfiguration {
     private static final AtomicInteger REPORTING_THREAD_NUMBER = new AtomicInteger(1);
 
     private DomainEventAccessMode domainEventAccessMode = DomainEventAccessMode.NONE;
+    private Duration workflowRetention = Duration.ofDays(30);
+    private int workflowMaxFinishedExecutions = 10_000;
 
     private AxoniqConsoleDlqMode dlqMode = AxoniqConsoleDlqMode.NONE;
     private List<String> dlqDiagnosticsWhitelist = new ArrayList<>();
@@ -171,6 +174,33 @@ public class AxoniqPlatformConfiguration {
         return this;
     }
 
+    /**
+     * How long finished workflow executions stay listed. The client keeps the start and end of every execution in
+     * memory to list them, so this bounds that memory; running executions are always kept. Defaults to 30 days.
+     *
+     * @param workflowRetention How long a finished execution stays listed, never {@code null}
+     * @return The builder for fluent interfacing
+     */
+    public AxoniqPlatformConfiguration workflowRetention(Duration workflowRetention) {
+        BuilderUtils.assertNonNull(workflowRetention, "Axoniq Platform workflowRetention may not be null");
+        this.workflowRetention = workflowRetention;
+        return this;
+    }
+
+    /**
+     * The most finished workflow executions listed at once, the oldest going first, so a busy application cannot grow
+     * the list past this within the retention. Defaults to 10,000.
+     *
+     * @param workflowMaxFinishedExecutions The number of finished executions to keep listed, at least 0
+     * @return The builder for fluent interfacing
+     */
+    public AxoniqPlatformConfiguration workflowMaxFinishedExecutions(int workflowMaxFinishedExecutions) {
+        BuilderUtils.assertThat(workflowMaxFinishedExecutions, it -> it >= 0,
+                                "Axoniq Platform workflowMaxFinishedExecutions may not be negative");
+        this.workflowMaxFinishedExecutions = workflowMaxFinishedExecutions;
+        return this;
+    }
+
     public ScheduledExecutorService getReportingTaskExecutor() {
         if (reportingTaskExecutor == null) {
             reportingTaskExecutor = Executors.newScheduledThreadPool(reportingThreadPoolSize, reportingThreadFactory());
@@ -226,6 +256,14 @@ public class AxoniqPlatformConfiguration {
 
     public DomainEventAccessMode getDomainEventAccessMode() {
         return domainEventAccessMode;
+    }
+
+    public Duration getWorkflowRetention() {
+        return workflowRetention;
+    }
+
+    public int getWorkflowMaxFinishedExecutions() {
+        return workflowMaxFinishedExecutions;
     }
 
     /**

@@ -16,7 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Service-loaded enhancer that wires the {@link WorkflowDefinitionsResponder} when the platform client is connected
+ * Service-loaded enhancer that wires the {@link WorkflowDefinitionsReporter} when the platform client is connected
  * and the workflow engine is on the classpath. Free of workflow engine types, so it loads without the engine; the
  * wiring lives in {@link WorkflowDefinitionDecorators}, touched only after the classpath probe succeeds.
  */

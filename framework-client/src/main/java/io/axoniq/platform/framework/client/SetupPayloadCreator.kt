@@ -352,7 +352,7 @@ class SetupPayloadCreator @JvmOverloads constructor(
 
     private fun hasWorkflowEngine(): Boolean {
         try {
-            val responderClass = Class.forName("io.axoniq.platform.framework.workflow.WorkflowDefinitionsResponder")
+            val responderClass = Class.forName("io.axoniq.platform.framework.workflow.WorkflowDefinitionsReporter")
             return configuration.hasComponent(responderClass)
         } catch (_: ClassNotFoundException) {
             return false

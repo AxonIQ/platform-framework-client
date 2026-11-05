@@ -28,13 +28,19 @@ import io.axoniq.platform.framework.api.metrics.WorkflowStatistics
 import io.axoniq.platform.framework.client.RSocketHandlerRegistrar
 import io.axoniq.platform.framework.client.strategy.CborJackson3EncodingStrategy
 import org.axonframework.common.configuration.AxonConfiguration
+import io.axoniq.framework.workflow.runtime.execution.EventSourcedWorkflowState
 import org.axonframework.common.configuration.ComponentDefinition
+import org.axonframework.eventsourcing.eventstore.EventStore
+import org.axonframework.eventsourcing.eventstore.Position
+import org.axonframework.eventsourcing.snapshot.inmemory.InMemorySnapshotStore
+import org.axonframework.eventsourcing.snapshot.store.SnapshotStore
 import org.axonframework.messaging.core.MessageType
 import org.axonframework.messaging.core.QualifiedName
 import org.axonframework.messaging.eventhandling.EventSink
 import org.axonframework.messaging.eventhandling.GenericEventMessage
 import org.awaitility.Awaitility.await
 import java.time.Duration
+import java.time.Instant
 import java.util.function.UnaryOperator
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -45,10 +51,10 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 
-class WorkflowDefinitionsResponderIntegrationTest {
+class WorkflowIntegrationTest {
 
     private lateinit var configuration: AxonConfiguration
-    private lateinit var responder: WorkflowDefinitionsResponder
+    private lateinit var reporter: WorkflowDefinitionsReporter
 
     @BeforeEach
     fun setUp() {
@@ -63,6 +69,7 @@ class WorkflowDefinitionsResponderIntegrationTest {
                                     .notCustomized()
                         })
                 .componentRegistry { cr ->
+                    cr.registerComponent(ComponentDefinition.ofType(SnapshotStore::class.java).withBuilder { InMemorySnapshotStore() })
                     cr.registerComponent(ComponentDefinition.ofType(RSocketHandlerRegistrar::class.java)
                             .withBuilder { RSocketHandlerRegistrar(CborJackson3EncodingStrategy()) })
                     cr.registerComponent(ComponentDefinition.ofType(AxoniqPlatformConfiguration::class.java)
@@ -73,7 +80,7 @@ class WorkflowDefinitionsResponderIntegrationTest {
                 }
                 .start()
 
-        responder = configuration.getComponent(WorkflowDefinitionsResponder::class.java)
+        reporter = configuration.getComponent(WorkflowDefinitionsReporter::class.java)
     }
 
     @AfterEach
@@ -86,14 +93,14 @@ class WorkflowDefinitionsResponderIntegrationTest {
             .get()
 
     private fun definition(name: String): WorkflowDefinitionDescription =
-            responder.definitions().definitions.single { it.name == name }
+            reporter.definitions().definitions.single { it.name == name }
 
     @Nested
     inner class Registration {
 
         @Test
         fun `every workflow module's definitions are listed`() {
-            val names = responder.definitions().definitions.map { it.name }.toSet()
+            val names = reporter.definitions().definitions.map { it.name }.toSet()
 
             assertEquals(setOf("annotatedOrder", "lambda"), names)
         }
@@ -210,30 +217,67 @@ class WorkflowDefinitionsResponderIntegrationTest {
     }
 
     @Nested
-    inner class Statistics {
+    inner class Projection {
 
-        private val collector get() = configuration.getComponent(WorkflowStatisticsCollector::class.java)
-        private val reported = HashMap<WorkflowStatisticIdentifier, WorkflowStatistics>()
+        private val executions get() = configuration.getComponent(WorkflowExecutionsResponder::class.java)
 
-        private fun drain() = collector.drain().forEach { (key, statistics) ->
-            reported.merge(key, statistics) { before, now ->
-                WorkflowStatistics(
-                        started = before.started + now.started,
-                        completed = before.completed + now.completed,
-                        failed = before.failed + now.failed,
-                        cancelled = before.cancelled + now.cancelled,
-                        timedOut = before.timedOut + now.timedOut,
-                        retries = before.retries + now.retries,
-                        measured = before.measured + now.measured,
-                        durationMillis = before.durationMillis + now.durationMillis,
-                        open = now.open,
-                )
+        @BeforeEach
+        fun startBothWorkflowsTwice() {
+            publish("OrderPlaced", orderId = "order-1")
+            publish("OrderPlaced", orderId = "order-2")
+            await().atMost(Duration.ofSeconds(10)).until {
+                executions.executions(WorkflowExecutionsQuery(status = "COMPLETED")).total == 2L
             }
         }
 
-        private fun of(definition: String, step: String? = null): WorkflowStatistics {
-            drain()
-            return reported[WorkflowStatisticIdentifier(definitionName = definition, definitionVersion = "0.0.1", stepName = step)]
+        @Test
+        fun `finished executions beyond the maximum are left out, the oldest first`() {
+            val lastFinished = executions.executions(WorkflowExecutionsQuery(status = "COMPLETED")).items.maxOf { it.finishedAt!! }
+            val projection = WorkflowExecutionsProjection(configuration, maxFinished = 1) { emptySet() }
+
+            val listed = projection.read { instances -> instances.map { it.status to it.finishedAt } }
+
+            assertEquals(3, listed.size)
+            assertEquals(listOf(lastFinished), listed.filter { it.first == "COMPLETED" }.map { it.second })
+        }
+
+        @Test
+        fun `only the workflows this application defines are listed`() {
+            val projection = WorkflowExecutionsProjection(configuration) { setOf("lambda") }
+
+            assertEquals(setOf("lambda"), projection.read { instances -> instances.map { it.definitionName }.toSet() })
+            assertEquals(null, projection.openCounts()!![WorkflowStatisticIdentifier(definitionName = "annotatedOrder", definitionVersion = "0.0.1")])
+        }
+
+        @Test
+        fun `a node that starts later continues from the snapshot the others stored`() {
+            WorkflowExecutionsProjection(configuration) { emptySet() }.refresh()
+            val snapshot = configuration.getComponent(SnapshotStore::class.java)
+                    .load(QualifiedName("io.axoniq.platform.WorkflowExecutions"), "test-app", null).get()
+            assertNotNull(snapshot)
+            assertTrue(snapshot!!.position() != Position.START)
+
+            publish("OrderPlaced", orderId = "order-3")
+            val later = WorkflowExecutionsProjection(configuration) { emptySet() }
+
+            await().atMost(Duration.ofSeconds(10)).until { later.read { it.size } == 6 }
+        }
+    }
+
+    @Nested
+    inner class Statistics {
+
+        private val executions get() = configuration.getComponent(WorkflowExecutionsResponder::class.java)
+
+        private val collector get() = configuration.getComponent(WorkflowStatisticsCollector::class.java)
+        private val reported = HashMap<WorkflowStatisticsCollector, MutableMap<WorkflowStatisticIdentifier, WorkflowStatistics>>()
+
+        private fun drain(from: WorkflowStatisticsCollector = collector) =
+                from.drain().forEach { (key, statistics) -> reported.getOrPut(from) { HashMap() }[key] = statistics }
+
+        private fun of(definition: String, step: String? = null, from: WorkflowStatisticsCollector = collector): WorkflowStatistics {
+            drain(from)
+            return reported[from]?.get(WorkflowStatisticIdentifier(definitionName = definition, definitionVersion = "0.0.1", stepName = step))
                     ?: WorkflowStatistics()
         }
 
@@ -278,7 +322,8 @@ class WorkflowDefinitionsResponderIntegrationTest {
         }
 
         @Test
-        fun `counts are reported once, not again in the next report`() {
+        fun `every report carries the totals so far, so a lost report loses nothing`() {
+            val startedCounting = Instant.now().epochSecond - 60
             publish("OrderPlaced", orderId = "order-2")
             await().atMost(Duration.ofSeconds(10)).until { of("lambda").completed == 2L }
 
@@ -286,15 +331,35 @@ class WorkflowDefinitionsResponderIntegrationTest {
 
             assertEquals(2, of("lambda").started)
             assertEquals(2, of("annotatedOrder").started)
+            assertNotNull(of("lambda").since)
+            assertTrue(of("lambda").since!! >= startedCounting, "counting starts at the first event, not before")
         }
 
         @Test
-        fun `instances started before the tracker existed are read from the event store`() {
-            val tracker = WorkflowInstanceTracker(configuration)
+        fun `events of an instance that started on another node are counted on the version it started with`() {
+            val lambda = executions.executions(WorkflowExecutionsQuery(status = "COMPLETED")).items.single()
+            val events = sourceEvents(configuration, configuration.getComponent(EventStore::class.java),
+                    EventSourcedWorkflowState.criteriaBuilder(lambda.workflowId))
+            val otherNode = WorkflowMetricsRegistry(configuration, WorkflowExecutionsProjection(configuration) { emptySet() })
 
-            tracker.refresh()
+            otherNode.onAppended(events.filterNot { it.metadata()["workflowStatus"] == "STARTED" })
 
-            val open = tracker.openCounts()!!
+            await().atMost(Duration.ofSeconds(10)).until { of("lambda", from = otherNode).completed == 1L }
+            assertEquals(1, of("lambda", "first", from = otherNode).completed)
+            assertEquals(1, of("lambda", "first", from = otherNode).measured)
+            val workflow = of("lambda", from = otherNode)
+            assertEquals(0, workflow.started)
+            assertEquals(1, workflow.completed)
+            assertEquals(1, workflow.measured)
+        }
+
+        @Test
+        fun `instances started before this node knew them are read from the event store`() {
+            val projection = WorkflowExecutionsProjection(configuration) { emptySet() }
+
+            projection.refresh()
+
+            val open = projection.openCounts()!!
             assertEquals(1, open[WorkflowStatisticIdentifier(definitionName = "annotatedOrder", definitionVersion = "0.0.1")])
             assertEquals(1, open[WorkflowStatisticIdentifier(definitionName = "annotatedOrder", definitionVersion = "0.0.1", stepName = "paymentReceived")])
             assertEquals(null, open[WorkflowStatisticIdentifier(definitionName = "lambda", definitionVersion = "0.0.1")])
@@ -323,7 +388,7 @@ class WorkflowDefinitionsResponderIntegrationTest {
 
         @Test
         fun `definitions with different steps have different fingerprints`() {
-            val fingerprints = responder.definitions().definitions.map { it.fingerprint }
+            val fingerprints = reporter.definitions().definitions.map { it.fingerprint }
 
             assertTrue(fingerprints.all { it != null && it.length == 12 })
             assertEquals(2, fingerprints.toSet().size)
@@ -331,7 +396,7 @@ class WorkflowDefinitionsResponderIntegrationTest {
 
         @Test
         fun `every definition with a graph has a BPMN document`() {
-            responder.definitions().definitions.forEach {
+            reporter.definitions().definitions.forEach {
                 assertNotNull(it.bpmnXml, it.name)
                 assertTrue(it.bpmnXml!!.contains("<bpmn:process"), it.name)
             }

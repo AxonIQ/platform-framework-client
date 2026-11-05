@@ -10,7 +10,7 @@ package io.axoniq.platform.framework.api
 
 /**
  * The workflow definitions registered in an application, each with the graph the client read from the definition's
- * code. Requested on demand over [Routes.Workflow.DEFINITIONS]; nothing about workflows is pushed.
+ * code. Each node reports them over [Routes.Workflow.DEFINITIONS_REPORT] once per connection.
  */
 data class WorkflowDefinitionsResult(
         val definitions: List<WorkflowDefinitionDescription>,

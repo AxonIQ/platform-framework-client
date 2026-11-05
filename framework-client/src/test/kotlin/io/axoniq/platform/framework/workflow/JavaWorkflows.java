@@ -14,6 +14,7 @@ import io.axoniq.framework.workflow.dsl.simple.SimpleWorkflowContext;
 import io.axoniq.framework.workflow.runtime.api.execution.context.WorkflowDefinition;
 
 import java.time.Duration;
+import java.util.function.UnaryOperator;
 
 /**
  * Workflow definitions written in Java, as an application would. They are only read by the analysis, never run, so
@@ -81,6 +82,63 @@ public class JavaWorkflows {
             return;
         }
         ctx.awaitExecute("onlyWithPayload", Boolean.class, () -> true);
+    }
+
+    public void loopAroundOptionalHelper(SimpleWorkflowContext ctx) {
+        while (!ctx.workflowPayload().isEmpty()) {
+            maybeNotify(ctx);
+        }
+        ctx.awaitExecute("afterLoop", Boolean.class, () -> true);
+    }
+
+    private void maybeNotify(SimpleWorkflowContext ctx) {
+        if (ctx.workflowPayload().containsKey("notify")) {
+            ctx.awaitPublish("notified", new Object());
+        }
+    }
+
+    public void cardUpdate(SimpleWorkflowContext ctx) {
+        if (!retryWithUpdatedCard(ctx)) {
+            ctx.awaitExecute("downgrade", Boolean.class, () -> true);
+            return;
+        }
+        ctx.awaitExecute("activate", Boolean.class, () -> true);
+    }
+
+    private boolean retryWithUpdatedCard(SimpleWorkflowContext ctx) {
+        try {
+            ctx.awaitEvent("awaitCardUpdate", Object.class, null, UnaryOperator.identity());
+        } catch (RuntimeException e) {
+            return false;
+        }
+        ctx.awaitExecute("retryCharge", Boolean.class, () -> true);
+        return true;
+    }
+
+    public void retryThroughCatch(SimpleWorkflowContext ctx) {
+        while (true) {
+            try {
+                ctx.awaitExecute("charge", Boolean.class, () -> true);
+                break;
+            } catch (RuntimeException e) {
+                ctx.sleep("backOff", Duration.ofSeconds(10));
+            }
+        }
+        ctx.awaitPublish("charged", new Object());
+        ctx.awaitExecute("ship", Boolean.class, () -> true);
+    }
+
+    public void threeWaysToPay(SimpleWorkflowContext ctx) {
+        WorkflowStepResult payment;
+        if (ctx.workflowPayload().containsKey("card")) {
+            payment = ctx.execute("chargeCard", (PayloadProcessor) null);
+        } else if (ctx.workflowPayload().containsKey("invoice")) {
+            payment = ctx.execute("invoice", (PayloadProcessor) null);
+        } else {
+            payment = ctx.execute("bankTransfer", (PayloadProcessor) null);
+        }
+        ctx.allMatch(WorkflowStepResult::success, payment).await();
+        ctx.awaitExecute("deliver", Boolean.class, () -> true);
     }
 
     public static WorkflowDefinition<SimpleWorkflowContext> lambdaDefinition() {

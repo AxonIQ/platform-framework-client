@@ -11,12 +11,15 @@ package io.axoniq.platform.framework.api.metrics
 import com.fasterxml.jackson.annotation.JsonProperty
 
 /**
- * What a workflow, or one of its steps, did since the previous report: counts of its events, and the attempts whose
- * start and end are both known, measured as [measured] durations adding up to [durationMillis].
+ * What a workflow, or one of its steps, did on this node since [since], in epoch seconds, when the node began counting
+ * it at its first event: counts of its events, and the attempts whose start and end are both known, measured as
+ * [measured] durations adding up to [durationMillis].
+ * The totals only grow, so the difference between two reports of a node is what happened in between, also when the
+ * reports between them were lost.
  *
  * [open] is the state at the time of the report instead: the instances of a workflow that have not ended, or the
  * instances waiting at a wait step. It is read from the event store, so every node of the application reports the
- * same value.
+ * same value. [duration] is the distribution of the last few minutes, sent only when new attempts were measured.
  */
 data class WorkflowStatistics(
     @JsonProperty("st")
@@ -39,4 +42,6 @@ data class WorkflowStatistics(
     val duration: StatisticDistribution? = null,
     @JsonProperty("o")
     val open: Long? = null,
+    @JsonProperty("si")
+    val since: Long? = null,
 )
