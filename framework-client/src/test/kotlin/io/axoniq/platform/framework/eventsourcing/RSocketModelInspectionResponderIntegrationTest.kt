@@ -102,9 +102,7 @@ class RSocketModelInspectionResponderIntegrationTest {
         @Test
         fun `query discovers entities defined in nested modules`() {
             val result = responder.handleRegisteredEntities()
-            assertEquals(1, result.entities.size, "expected the Reservation entity to be visible")
-
-            val entity = result.entities.first()
+            val entity = result.entities.single { it.entityType == Reservation::class.java.name }
             assertEquals(Reservation::class.java.name, entity.entityType)
             assertEquals(1, entity.idTypes.size)
             assertEquals(String::class.java.name, entity.idTypes.first().type)

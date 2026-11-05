@@ -147,6 +147,8 @@ data class SupportedFeatures(
         val licenseEntitlement: Boolean? = false,
         /* Whether the client supports model inspection (AF5 StateManager-based entity inspection). */
         val modelInspection: Boolean? = false,
+        /* Whether the client can describe its workflow definitions, graph included (Routes.Workflow). */
+        val workflowDefinitions: Boolean? = false,
 )
 
 data class Versions(
