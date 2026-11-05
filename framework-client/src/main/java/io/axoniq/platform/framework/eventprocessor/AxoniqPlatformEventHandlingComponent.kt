@@ -24,8 +24,11 @@ import org.axonframework.messaging.core.unitofwork.ProcessingContext
 import org.axonframework.messaging.eventhandling.EventHandlingComponent
 import org.axonframework.messaging.eventhandling.EventMessage
 import org.axonframework.messaging.eventhandling.processing.streaming.segmenting.Segment
+import org.axonframework.messaging.eventhandling.replay.ReplayStatusChanged
+import org.axonframework.messaging.eventhandling.replay.ResetContext
 import java.time.Instant
 import java.time.temporal.ChronoUnit
+import java.util.Optional
 
 class AxoniqPlatformEventHandlingComponent(
         val delegate: EventHandlingComponent,
@@ -81,10 +84,28 @@ class AxoniqPlatformEventHandlingComponent(
         return delegate.supportedEvents()
     }
 
-    override fun supports(eventName: QualifiedName): Boolean = delegate.supports(eventName)
+    override fun supports(eventName: QualifiedName): Boolean {
+        return delegate.supports(eventName)
+    }
 
     override fun sequenceIdentifierFor(event: EventMessage, context: ProcessingContext): Any {
         return delegate.sequenceIdentifierFor(event, context)
+    }
+
+    override fun supportsReset(): Boolean {
+        return delegate.supportsReset()
+    }
+
+    override fun handle(resetContext: ResetContext, context: ProcessingContext): MessageStream.Empty<Message> {
+        return delegate.handle(resetContext, context)
+    }
+
+    override fun handle(statusChange: ReplayStatusChanged, context: ProcessingContext): MessageStream.Empty<Message> {
+        return delegate.handle(statusChange, context)
+    }
+
+    override fun <C : Any> unwrap(componentType: Class<C>): Optional<C> {
+        return if (componentType.isInstance(this)) Optional.of(componentType.cast(this)) else delegate.unwrap(componentType)
     }
 
     override fun describeTo(descriptor: ComponentDescriptor) {
