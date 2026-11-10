@@ -30,6 +30,7 @@ import org.axonframework.messaging.eventhandling.GenericEventMessage
 import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
@@ -83,8 +84,8 @@ class WorkflowExecutionsProjectionTest {
         configuration.shutdown()
     }
 
-    private fun projection(refreshWait: Duration? = null) =
-            WorkflowExecutionsProjection(configuration, refreshWait = refreshWait, definitionNames = reporter::definitionNames)
+    private fun projection(refreshWait: Duration? = null, definitionNames: () -> Set<String> = reporter::definitionNames) =
+            WorkflowExecutionsProjection(configuration, refreshWait = refreshWait, definitionNames = definitionNames)
 
     private fun WorkflowExecutionsProjection.names() = read { instances -> instances.map { it.definitionName }.toSet() }
 
@@ -108,6 +109,48 @@ class WorkflowExecutionsProjectionTest {
             storeSnapshot(version = WorkflowExecutionsProjection.SNAPSHOT_VERSION, payload = "not a snapshot".toByteArray())
 
             assertEquals(setOf("annotatedOrder", "lambda"), projection().names())
+        }
+
+        @Test
+        fun `a snapshot of a node that does not define every workflow defined here is ignored`() {
+            storeSnapshot(version = "unknown", payload = ByteArray(0))
+            projection { setOf("lambda") }.refresh()
+
+            assertEquals(setOf("annotatedOrder", "lambda"), projection().names())
+        }
+    }
+
+    @Nested
+    inner class Definitions {
+
+        @Test
+        fun `nothing is listed when this application defines no workflows`() {
+            val projection = projection { emptySet() }
+
+            assertEquals(emptySet<String>(), projection.names())
+            assertNull(projection.openCounts())
+        }
+
+        @Test
+        fun `instances are listed once the definitions are known`() {
+            var defined = emptySet<String>()
+            val projection = projection { defined }
+            assertEquals(emptySet<String>(), projection.names())
+
+            defined = reporter.definitionNames()
+
+            assertEquals(setOf("annotatedOrder", "lambda"), projection.names())
+        }
+
+        @Test
+        fun `a definition added later brings in the instances read before it`() {
+            var defined = setOf("lambda")
+            val projection = projection { defined }
+            assertEquals(setOf("lambda"), projection.names())
+
+            defined = setOf("lambda", "annotatedOrder")
+
+            assertEquals(setOf("annotatedOrder", "lambda"), projection.names())
         }
     }
 

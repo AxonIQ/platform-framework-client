@@ -233,7 +233,7 @@ class WorkflowIntegrationTest {
         @Test
         fun `finished executions beyond the maximum are left out, the oldest first`() {
             val lastFinished = executions.executions(WorkflowExecutionsQuery(status = "COMPLETED")).items.maxOf { it.finishedAt!! }
-            val projection = WorkflowExecutionsProjection(configuration, maxFinished = 1) { emptySet() }
+            val projection = WorkflowExecutionsProjection(configuration, maxFinished = 1, definitionNames = reporter::definitionNames)
 
             val listed = projection.read { instances -> instances.map { it.status to it.finishedAt } }
 
@@ -251,14 +251,14 @@ class WorkflowIntegrationTest {
 
         @Test
         fun `a node that starts later continues from the snapshot the others stored`() {
-            WorkflowExecutionsProjection(configuration) { emptySet() }.refresh()
+            WorkflowExecutionsProjection(configuration, definitionNames = reporter::definitionNames).refresh()
             val snapshot = configuration.getComponent(SnapshotStore::class.java)
                     .load(QualifiedName("io.axoniq.platform.WorkflowExecutions"), "test-app", null).get()
             assertNotNull(snapshot)
             assertTrue(snapshot!!.position() != Position.START)
 
             publish("OrderPlaced", orderId = "order-3")
-            val later = WorkflowExecutionsProjection(configuration) { emptySet() }
+            val later = WorkflowExecutionsProjection(configuration, definitionNames = reporter::definitionNames)
 
             await().atMost(Duration.ofSeconds(10)).until { later.read { it.size } == 6 }
         }
@@ -340,7 +340,7 @@ class WorkflowIntegrationTest {
             val lambda = executions.executions(WorkflowExecutionsQuery(status = "COMPLETED")).items.single()
             val events = sourceEvents(configuration, configuration.getComponent(EventStore::class.java),
                     EventSourcedWorkflowState.criteriaBuilder(lambda.workflowId))
-            val otherNode = WorkflowMetricsRegistry(configuration, WorkflowExecutionsProjection(configuration) { emptySet() })
+            val otherNode = WorkflowMetricsRegistry(configuration, WorkflowExecutionsProjection(configuration, definitionNames = reporter::definitionNames))
 
             otherNode.onAppended(events.filterNot { it.metadata()["workflowStatus"] == "STARTED" })
 
@@ -355,7 +355,7 @@ class WorkflowIntegrationTest {
 
         @Test
         fun `instances started before this node knew them are read from the event store`() {
-            val projection = WorkflowExecutionsProjection(configuration) { emptySet() }
+            val projection = WorkflowExecutionsProjection(configuration, definitionNames = reporter::definitionNames)
 
             projection.refresh()
 

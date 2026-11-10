@@ -54,8 +54,12 @@ import java.util.zip.GZIPOutputStream
  * the application store in the [SnapshotStore] every few minutes, so the full history is read once, not at every
  * boot; without a snapshot store it starts from the beginning. Events this node appends are applied right away as
  * well, so its own instances are known before the next refresh. A request waits at most [refreshWait] for a refresh
- * and otherwise answers from what is known, so a long first read does not make it time out. Instances of workflows
- * this application does not define are left out: applications that share an event store see each other's events.
+ * and otherwise answers from what is known, so a long first read does not make it time out.
+ *
+ * Only instances of the workflows this application defines are kept, because applications that share an event store
+ * see each other's events. Until the definitions are known nothing is read, and when they change everything is read
+ * again. The events carry no application identity, so two applications that share a context and define a workflow of
+ * the same name both list the instances of either.
  */
 internal class WorkflowExecutionsProjection(
         private val configuration: Configuration,
@@ -72,7 +76,6 @@ internal class WorkflowExecutionsProjection(
     private val maxFinished = maxFinished ?: settings?.workflowMaxFinishedExecutions ?: 10_000
     private val snapshotName = settings?.applicationName ?: "application"
     private val refreshWait = refreshWait ?: Duration.ofSeconds(5)
-    private var restored = false
     private var lastSnapshotAt = Instant.EPOCH
     private var changedSinceSnapshot = false
     private val background = Executors.newSingleThreadExecutor { Thread(it, "axoniq-platform-workflow-executions").apply { isDaemon = true } }
@@ -80,13 +83,20 @@ internal class WorkflowExecutionsProjection(
     private var running: CompletableFuture<Void>? = null
 
     @Volatile
+    private var definitions = emptySet<String>()
+
+    @Volatile
     private var ready = false
 
     @Synchronized
     fun refresh() {
-        if (!restored) {
+        val defined = definitionNames()
+        if (defined.isEmpty()) return
+        if (defined != definitions) {
+            definitions = defined
+            instances.clear()
+            events.position = Position.START
             restore()
-            restored = true
         }
         if (events.read { apply(it) } > 0) changedSinceSnapshot = true
         prune()
@@ -138,13 +148,11 @@ internal class WorkflowExecutionsProjection(
         val instance = instances[workflowId] ?: run {
             val name = event.metadata()[DEFINITION_NAME] ?: return
             if (event.metadata()[WORKFLOW_STATUS] != WorkflowStatus.STARTED.name) return
-            if (!definedHere(name)) return
+            if (name !in definitions) return
             instances.computeIfAbsent(workflowId) { WorkflowInstance(it) }
         }
         instance.apply(event)
     }
-
-    private fun definedHere(name: String) = definitionNames().let { it.isEmpty() || name in it }
 
     /** Drops what ended before the retention, then the oldest finished beyond the maximum. */
     private fun prune() {
@@ -162,7 +170,9 @@ internal class WorkflowExecutionsProjection(
             val snapshot = store.load(SNAPSHOT_NAME, snapshotName, null).get(SNAPSHOT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                     ?.takeIf { it.version == SNAPSHOT_VERSION } ?: return
             val payload = GZIPInputStream(ByteArrayInputStream(snapshot.payload() as ByteArray)).use { mapper.readValue<SnapshotPayload>(it) }
-            payload.instances.filter { definedHere(it.name) }.forEach { instances[it.id] = it.toInstance() }
+            // A node that does not define all of ours left their instances out.
+            if (!payload.definitions.containsAll(definitions)) return
+            payload.instances.filter { it.name in definitions }.forEach { instances[it.id] = it.toInstance() }
             events.position = snapshot.position()
             logger.debug { "Restored ${payload.instances.size} workflow executions from the snapshot at ${snapshot.position()}" }
         } catch (e: Exception) {
@@ -175,7 +185,7 @@ internal class WorkflowExecutionsProjection(
     private fun storeSnapshot() {
         val store = configuration.getOptionalComponent(SnapshotStore::class.java).orElse(null) ?: return
         val bytes = ByteArrayOutputStream().also { out ->
-            GZIPOutputStream(out).use { mapper.writeValue(it, SnapshotPayload(instances.values.map { instance -> instance.toSnapshot() })) }
+            GZIPOutputStream(out).use { mapper.writeValue(it, SnapshotPayload(definitions, instances.values.map { instance -> instance.toSnapshot() })) }
         }.toByteArray()
         store.store(SNAPSHOT_NAME, snapshotName, Snapshot(events.position, SNAPSHOT_VERSION, bytes, Instant.now(), emptyMap()), null)
                 .whenComplete { _, e -> if (e != null) logger.debug(e) { "Could not store the workflow executions snapshot" } }
@@ -183,7 +193,7 @@ internal class WorkflowExecutionsProjection(
         changedSinceSnapshot = false
     }
 
-    private data class SnapshotPayload(val instances: List<SnapshotInstance>)
+    private data class SnapshotPayload(val definitions: Set<String>, val instances: List<SnapshotInstance>)
 
     private data class SnapshotInstance(
             val id: String,
