@@ -36,8 +36,12 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
@@ -49,13 +53,15 @@ import java.util.zip.GZIPOutputStream
  * A [refresh] reads the events appended since the previous one. The first one starts from the snapshot the nodes of
  * the application store in the [SnapshotStore] every few minutes, so the full history is read once, not at every
  * boot; without a snapshot store it starts from the beginning. Events this node appends are applied right away as
- * well, so its own instances are known before the next refresh. Instances of workflows this application does not
- * define are left out: applications that share an event store see each other's events.
+ * well, so its own instances are known before the next refresh. A request waits at most [refreshWait] for a refresh
+ * and otherwise answers from what is known, so a long first read does not make it time out. Instances of workflows
+ * this application does not define are left out: applications that share an event store see each other's events.
  */
 internal class WorkflowExecutionsProjection(
         private val configuration: Configuration,
         retention: Duration? = null,
         maxFinished: Int? = null,
+        refreshWait: Duration? = null,
         private val definitionNames: () -> Set<String>,
 ) {
     private val logger = KotlinLogging.logger { }
@@ -65,9 +71,13 @@ internal class WorkflowExecutionsProjection(
     private val retention = retention ?: settings?.workflowRetention ?: Duration.ofDays(30)
     private val maxFinished = maxFinished ?: settings?.workflowMaxFinishedExecutions ?: 10_000
     private val snapshotName = settings?.applicationName ?: "application"
+    private val refreshWait = refreshWait ?: Duration.ofSeconds(5)
     private var restored = false
     private var lastSnapshotAt = Instant.EPOCH
     private var changedSinceSnapshot = false
+    private val background = Executors.newSingleThreadExecutor { Thread(it, "axoniq-platform-workflow-executions").apply { isDaemon = true } }
+    private val refreshLock = Any()
+    private var running: CompletableFuture<Void>? = null
 
     @Volatile
     private var ready = false
@@ -86,8 +96,22 @@ internal class WorkflowExecutionsProjection(
         }
     }
 
+    /** Starts a refresh in the background, or returns the one that is running. */
+    fun refreshInBackground(): CompletableFuture<Void> = synchronized(refreshLock) {
+        running ?: CompletableFuture.runAsync(::refresh, background).also { refresh ->
+            running = refresh
+            refresh.whenComplete { _, _ -> synchronized(refreshLock) { if (running === refresh) running = null } }
+        }
+    }
+
     fun <T> read(read: (Collection<WorkflowInstance>) -> T): T {
-        refresh()
+        try {
+            refreshInBackground().get(refreshWait.toMillis(), TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+            logger.debug { "Reading the workflow executions takes longer than $refreshWait; answering from what is known" }
+        } catch (e: ExecutionException) {
+            logger.debug(e.cause) { "Could not read the workflow executions from the event store" }
+        }
         return read(instances.values)
     }
 
@@ -187,12 +211,12 @@ internal class WorkflowExecutionsProjection(
             startedAt = startedAt, finishedAt = finishedAt, lastEventAt = lastEventAt, waits = HashMap(waits),
     )
 
-    private companion object {
+    internal companion object {
         val SNAPSHOT_NAME = QualifiedName("io.axoniq.platform.WorkflowExecutions")
         const val SNAPSHOT_VERSION = "1"
-        const val SNAPSHOT_TIMEOUT_SECONDS = 30L
-        val SNAPSHOT_INTERVAL: Duration = Duration.ofMinutes(5)
-        val mapper: CBORMapper = CBORMapper.builder().addModule(KotlinModule.Builder().build()).build()
+        private const val SNAPSHOT_TIMEOUT_SECONDS = 30L
+        private val SNAPSHOT_INTERVAL: Duration = Duration.ofMinutes(5)
+        private val mapper: CBORMapper = CBORMapper.builder().addModule(KotlinModule.Builder().build()).build()
     }
 }
 
@@ -200,7 +224,10 @@ internal class WorkflowExecutionsProjection(
  * Sources the events matching [criteria] that were appended since the previous [read].
  *
  * The next read starts after the last event read, not at the resume position the store reports: under concurrent
- * appends that position can lie past events that were not visible yet, which would then never be read.
+ * appends that position can lie past events that were not visible yet, which would then never be read. The position
+ * is the token of the last event read. Engines give an event the token after it and source from a position
+ * inclusively, so the next read starts after that event. Events whose token is not past the position are skipped
+ * anyway, so an engine that does return that event again neither applies it twice nor reports it as new.
  */
 internal class IncrementalSource(private val configuration: Configuration, private val criteria: EventCriteria) {
     var position: Position = Position.START
@@ -208,17 +235,19 @@ internal class IncrementalSource(private val configuration: Configuration, priva
     /** Reads the new events, returning how many there were. */
     fun read(consumer: (EventMessage) -> Unit): Int {
         val eventStore = configuration.getOptionalComponent(EventStore::class.java).orElse(null) ?: return 0
+        val after = (position as? GlobalIndexPosition)?.let(GlobalIndexPosition::toIndex) ?: Long.MIN_VALUE
         var next: Position? = null
         var count = 0
         configuration.getComponent(UnitOfWorkFactory::class.java).create().executeWithResult { context ->
             eventStore.transaction(context)
                     .source(SourcingCondition.conditionFor(position, criteria))
                     .reduce(Unit) { _, entry ->
-                        consumer(entry.message())
-                        count++
-                        TrackingToken.fromContext(entry)
-                                .map { (it as? GlobalSequenceTrackingToken)?.globalIndex }
-                                .ifPresent { next = GlobalIndexPosition(it) }
+                        val index = TrackingToken.fromContext(entry).map { (it as? GlobalSequenceTrackingToken)?.globalIndex }.orElse(null)
+                        if (index == null || index > after) {
+                            consumer(entry.message())
+                            count++
+                            index?.let { next = GlobalIndexPosition(it) }
+                        }
                     }
                     .thenApply { true }
         }.get()

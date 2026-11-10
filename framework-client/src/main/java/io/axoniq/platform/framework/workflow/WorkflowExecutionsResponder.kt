@@ -31,9 +31,9 @@ import org.axonframework.messaging.eventhandling.conversion.EventConverter
  * application's event store, when asked. Workflow metrics travel in the statistics report instead, see
  * [WorkflowMetricsRegistry].
  *
- * The list comes from the [WorkflowExecutionsProjection], which each request brings up to date. One execution and its
- * journal are read from that execution's own events, which the engine tags with its workflow id, so they show its
- * payloads and stay cheap to poll.
+ * The list comes from the [WorkflowExecutionsProjection], which each request brings up to date if that takes no longer
+ * than a few seconds. One execution and its journal are read from that execution's own events, which the engine tags
+ * with its workflow id, so they show its payloads and stay cheap to poll.
  */
 internal class WorkflowExecutionsResponder(
         private val registrar: RSocketHandlerRegistrar,

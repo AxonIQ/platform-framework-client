@@ -47,7 +47,7 @@ final class WorkflowDefinitionDecorators {
                                            .ofType(WorkflowExecutionsProjection.class)
                                            .withBuilder(c -> {
                                                WorkflowDefinitionsReporter reporter = c.getComponent(WorkflowDefinitionsReporter.class);
-                                               return new WorkflowExecutionsProjection(c, null, null, reporter::definitionNames);
+                                               return new WorkflowExecutionsProjection(c, null, null, null, reporter::definitionNames);
                                            }));
         registry.registerComponent(ComponentDefinition
                                            .ofType(WorkflowExecutionsResponder.class)
