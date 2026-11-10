@@ -35,6 +35,7 @@ import org.axonframework.common.configuration.ComponentRegistry;
 import org.axonframework.common.configuration.Configuration;
 import org.axonframework.common.configuration.ConfigurationEnhancer;
 import org.axonframework.common.configuration.DecoratorDefinition;
+import org.axonframework.common.configuration.BaseModule;
 import org.axonframework.common.configuration.Module;
 import org.axonframework.common.lifecycle.Phase;
 import org.axonframework.messaging.commandhandling.CommandBus;
@@ -176,15 +177,19 @@ public class AxoniqPlatformConfigurerEnhancer implements ConfigurationEnhancer {
                     && !(module instanceof SubscribingEventProcessorModule)) {
                 return null;
             }
-            componentRegistry
+            // Registered on the processor's own registry: every module inherits the decorators of
+            // its parent, so a decorator on the parent would wrap the components of all sibling
+            // processors and report their events under this processor's name.
+            String processorName = getProcessorName(module);
+            ((BaseModule<?>) module).componentRegistry(moduleRegistry -> moduleRegistry
                     .registerDecorator(DecoratorDefinition.forType(EventHandlingComponent.class)
                                                           .with((cc, name, delegate) ->
                                                                         new AxoniqPlatformEventHandlingComponent(
                                                                                 delegate,
-                                                                                getProcessorName(module),
+                                                                                processorName,
                                                                                 cc.getComponent(HandlerMetricsRegistry.class),
                                                                                 cc.getComponent(ProcessorMetricsRegistry.class)))
-                                                          .order(0));
+                                                          .order(0)));
 
             return null;
         }, true);
