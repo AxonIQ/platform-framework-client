@@ -18,21 +18,23 @@ import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode
 import io.axoniq.platform.framework.api.DeadLetterResponse
 import io.axoniq.platform.framework.api.DeadLettersForAutomaticRetryRequest
 import io.axoniq.platform.framework.api.SequenceLettersResponse
+import io.axoniq.platform.framework.tenancy.PlatformTenancy
 import org.apache.commons.codec.digest.DigestUtils
 import org.axonframework.common.configuration.Configuration
-import org.axonframework.messaging.core.EmptyApplicationContext
 import org.axonframework.messaging.core.Metadata
 import org.axonframework.messaging.core.unitofwork.ProcessingContext
-import org.axonframework.messaging.core.unitofwork.SimpleUnitOfWorkFactory
 import org.axonframework.messaging.core.unitofwork.UnitOfWorkFactory
 import org.axonframework.messaging.eventhandling.EventHandlingComponent
 import org.axonframework.messaging.eventhandling.EventMessage
 import org.slf4j.LoggerFactory
+import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicLong
 import io.axoniq.platform.framework.api.DeadLetter as ApiDeadLetter
 
 private const val LETTER_PAYLOAD_SIZE_LIMIT = 1024
@@ -73,24 +75,30 @@ class DeadLetterManager @JvmOverloads constructor(
         private val configuration: Configuration,
         private val dlqMode: AxoniqConsoleDlqMode = AxoniqConsoleDlqMode.NONE,
         private val dlqDiagnosticsWhitelist: List<String> = emptyList(),
+        clock: Clock = Clock.systemUTC(),
+        tenantSizeTtl: Duration = Duration.ofSeconds(30),
+        private val tenancyOf: (Configuration) -> PlatformTenancy? = PlatformTenancy::of,
 ) : ProcessingGroupInfoSource {
+
+    private val tenantSizes = TenantSizeCache(clock = clock, ttl = tenantSizeTtl)
 
     @Volatile
     private var entries: List<DlqEntry>? = null
 
     /**
-     * Factory used to materialise a real [org.axonframework.messaging.core.unitofwork.UnitOfWork] when the
-     * manager needs to call [EventHandlingComponent.sequenceIdentifierFor] on a dead letter — that call
-     * requires a non-null [ProcessingContext] because some decorator layers (notably
-     * `SequenceCachingEventHandlingComponent`) store per-event resources on the context.
+     * The application's own factory, so tenant-bound DLQ calls run in a unit of work with its transaction
+     * management, which JDBC and JPA tenant queues need (as the tenant dead-letter queue reference guide
+     * prescribes). [EventHandlingComponent.sequenceIdentifierFor] needs a non-null [ProcessingContext] too,
+     * because `SequenceCachingEventHandlingComponent` stores per-event resources on it.
      *
-     * An [EmptyApplicationContext] is used because the stock sequencing-policy chain (constant,
-     * property, metadata, hierarchical, fallback) does not look up application components; the context
-     * is only consulted as a resource bag. If a custom policy ever needs richer context resolution the
-     * wiring can be revisited.
+     * The default factory's contexts are backed by the [Configuration]: a property-based policy (for example
+     * `@SequencingPolicy(type = PropertySequencingPolicy::class, ...)`) converts the payload with the
+     * `EventConverter` it looks up on the context, and without it every sequence falls back to the
+     * message identifier.
      */
-    private val unitOfWorkFactory: UnitOfWorkFactory =
-            SimpleUnitOfWorkFactory(EmptyApplicationContext.INSTANCE)
+    private val unitOfWorkFactory: UnitOfWorkFactory by lazy {
+        configuration.getComponent(UnitOfWorkFactory::class.java)
+    }
 
     /**
      * Discovers the DLQs configured on this application by walking each event-processor module.
@@ -118,7 +126,7 @@ class DeadLetterManager @JvmOverloads constructor(
 
     override fun infoFor(processorName: String): List<ProcessingGroupInfoSource.ProcessingGroupInfo> =
             dlqInfoForProcessor(processorName).map {
-                ProcessingGroupInfoSource.ProcessingGroupInfo(it.processingGroup, it.sequenceCount)
+                ProcessingGroupInfoSource.ProcessingGroupInfo(it.processingGroup, it.sequenceCount, it.sequenceCountPerTenant)
             }
 
 
@@ -142,36 +150,154 @@ class DeadLetterManager @JvmOverloads constructor(
     private val dlqNamePattern =
             Regex("""^DeadLetterQueue\[EventHandlingComponent\[([^]]+)]\[(.+)]]$""")
 
+    /**
+     * Null when the application is not multi-tenant. With multi-tenancy every queue is tenant-routed and refuses a
+     * call without a tenant on the processing context, so each operation below runs once per tenant it covers.
+     */
+    private val tenancy: PlatformTenancy? by lazy { tenancyOf(configuration) }
+
+    /** One sequence of a queue, with the tenant it belongs to (null in a single-tenant application). */
+    private data class TenantSequence(val tenant: String?, val letters: List<DeadLetter<out EventMessage>>)
+
+    /** The tenants a call covers: the one asked for, every tenant when none is, or none in a single-tenant application. */
+    private fun tenantsFor(tenant: String?): List<String?> {
+        val tenancy = tenancy ?: return listOf(null)
+        return if (tenant != null) listOf(tenant) else tenancy.tenants()
+    }
+
+    private fun <R : Any> inTenant(tenant: String?, call: (ProcessingContext?) -> CompletableFuture<R>): CompletableFuture<R> {
+        val tenancy = tenancy
+        if (tenant == null || tenancy == null) {
+            return call(null)
+        }
+        return unitOfWorkFactory.create().executeWithResult<R> { context ->
+            tenancy.bind(context, tenant)
+            call(context)
+        }
+    }
+
+    private fun sequencesOf(entry: DlqEntry, tenant: String?): List<TenantSequence> =
+            inTenant(tenant) { context ->
+                entry.dlq.deadLetters(context).thenApply { sequences ->
+                    sequences.map { TenantSequence(tenant, it.toList()) }
+                }
+            }.join()
+
+    private fun amountOfSequences(entry: DlqEntry, tenant: String?): Long =
+            inTenant(tenant) { context -> entry.dlq.amountOfSequences(context) }.join()
+
+    private fun apiSequenceIdsOf(entry: DlqEntry, heads: List<DeadLetter<out EventMessage>>, tenant: String?): List<String> {
+        val rawIds = sequenceIdentifiersFor(entry, heads, tenant)
+        return if (dlqMode == AxoniqConsoleDlqMode.MASKED) rawIds.map { it.hashed() } else rawIds
+    }
+
     fun deadLetters(
             processingGroup: String,
             offset: Int = 0,
             size: Int = 25,
             // Capped at 10 to keep poll payloads small; long sequences are browsed via sequenceLetters(...).
             maxSequenceLetters: Int = 10,
+            tenant: String? = null,
     ): DeadLetterResponse {
         val entry = dlqFor(processingGroup)
-        if (dlqMode == AxoniqConsoleDlqMode.NONE) {
-            return DeadLetterResponse(emptyList(), entry.dlq.amountOfSequences(null).join())
+        val tenancy = tenancy
+        if (tenant == null && tenancy != null) {
+            return deadLettersOfAllTenants(entry, tenancy, offset, size, maxSequenceLetters)
         }
-        val sequences = entry.dlq.deadLetters(null).join()
-        val pageOfSequences = sequences
+        val scope = tenantsFor(tenant).single()
+        val total = amountOfSequences(entry, scope)
+        if (dlqMode == AxoniqConsoleDlqMode.NONE) {
+            return DeadLetterResponse(emptyList(), total)
+        }
+        val pageOfSequences = sequencesOf(entry, scope)
                 .drop(offset)
                 .take(size)
-                .map { sequence ->
-                    val letters = sequence.toList()
-                    val rawSequenceId = letters.firstOrNull()?.let { sequenceIdentifierFor(entry, it) } ?: ""
-                    val apiSequenceId = if (dlqMode == AxoniqConsoleDlqMode.MASKED) rawSequenceId.hashed() else rawSequenceId
-                    letters
-                            .take(maxSequenceLetters)
-                            .map { it.toApiLetter(apiSequenceId) }
-                }
-        val total = entry.dlq.amountOfSequences(null).join()
+                .toApiSequences(entry, scope, maxSequenceLetters)
         return DeadLetterResponse(pageOfSequences, total)
     }
 
-    fun sequenceSize(processingGroup: String, sequenceIdentifier: String): Long {
+    /**
+     * Cuts the page from the per-tenant counts and loads only the tenants it falls in. The counts come from the
+     * size cache the processor report keeps warm, so paging does not count every tenant again. Loading a tenant
+     * reveals its real size, and a tenant on the page whose size no longer matches the cache sends the request to
+     * a fresh count, as does a tenant set that changed. A change in a tenant outside the page shows in the total
+     * once the TTL passes. A fresh count is not checked again: the page is cut from it, so it agrees with the total
+     * it is returned with.
+     */
+    private fun deadLettersOfAllTenants(
+            entry: DlqEntry,
+            tenancy: PlatformTenancy,
+            offset: Int,
+            size: Int,
+            maxSequenceLetters: Int,
+    ): DeadLetterResponse {
+        val tenants = tenancy.tenants()
+        val (counts, page) = tenantSizes.peek(entry.processingGroup)
+                ?.takeIf { it.keys == tenants.toSet() }
+                ?.let { cached -> loadPage(entry, cached, offset, size).takeIf { it.matches(cached) }?.let { cached to it } }
+                ?: tenantSizes.refresh(entry.processingGroup) { tenants.associateWith { amountOfSequences(entry, it) } }
+                        .let { fresh -> fresh to loadPage(entry, fresh, offset, size) }
+        val pageOfSequences = page.flatMap { (slice, sequences) ->
+            sequences.drop(slice.skip).take(slice.take).toApiSequences(entry, slice.tenant, maxSequenceLetters)
+        }
+        return DeadLetterResponse(pageOfSequences, counts.values.sum())
+    }
+
+    private data class LoadedSlice(val slice: TenantSlice, val sequences: List<TenantSequence>)
+
+    private fun loadPage(entry: DlqEntry, counts: Map<String, Long>, offset: Int, size: Int): List<LoadedSlice> =
+            if (dlqMode == AxoniqConsoleDlqMode.NONE) {
+                emptyList()
+            } else {
+                pageSlices(counts = counts, offset = offset, size = size)
+                        .map { LoadedSlice(slice = it, sequences = sequencesOf(entry, it.tenant)) }
+            }
+
+    private fun List<LoadedSlice>.matches(counts: Map<String, Long>): Boolean =
+            all { counts[it.slice.tenant] == it.sequences.size.toLong() }
+
+    private data class TenantSlice(val tenant: String, val skip: Int, val take: Int)
+
+    /**
+     * The part of each tenant that the page covers when the tenants' sequences are laid end to end in tenant id
+     * order. Cut by [counts] rather than by what a queue holds once loaded, so a tenant that gained sequences since
+     * it was counted does not push its neighbours' sequences onto the wrong page.
+     */
+    private fun pageSlices(counts: Map<String, Long>, offset: Int, size: Int): List<TenantSlice> {
+        var skip = offset.coerceAtLeast(0).toLong()
+        var remaining = size.coerceAtLeast(0).toLong()
+        val slices = mutableListOf<TenantSlice>()
+        for ((tenant, count) in counts.toSortedMap()) {
+            if (remaining == 0L) break
+            if (skip >= count) {
+                skip -= count
+                continue
+            }
+            val take = minOf(remaining, count - skip)
+            slices += TenantSlice(tenant = tenant, skip = skip.toInt(), take = take.toInt())
+            remaining -= take
+            skip = 0
+        }
+        return slices
+    }
+
+    private fun List<TenantSequence>.toApiSequences(
+            entry: DlqEntry,
+            tenant: String?,
+            maxSequenceLetters: Int,
+    ): List<List<ApiDeadLetter>> {
+        val ids = apiSequenceIdsOf(entry, mapNotNull { it.letters.firstOrNull() }, tenant).iterator()
+        return map { sequence ->
+            val apiSequenceId = if (sequence.letters.isEmpty()) "" else ids.next()
+            sequence.letters
+                    .take(maxSequenceLetters)
+                    .map { it.toApiLetter(apiSequenceId, sequence.tenant) }
+        }
+    }
+
+    fun sequenceSize(processingGroup: String, sequenceIdentifier: String, tenant: String? = null): Long {
         val entry = dlqFor(processingGroup)
-        return findSequence(entry, sequenceIdentifier)?.count()?.toLong() ?: 0L
+        return findSequence(entry, sequenceIdentifier, tenant)?.letters?.count()?.toLong() ?: 0L
     }
 
     /**
@@ -184,20 +310,21 @@ class DeadLetterManager @JvmOverloads constructor(
             sequenceIdentifier: String,
             offset: Int,
             size: Int,
+            tenant: String? = null,
     ): SequenceLettersResponse {
         val entry = dlqFor(processingGroup)
         if (dlqMode == AxoniqConsoleDlqMode.NONE) {
             return SequenceLettersResponse(emptyList(), 0)
         }
-        val sequence = findSequence(entry, sequenceIdentifier)
+        val sequence = findSequence(entry, sequenceIdentifier, tenant)
                 ?: return SequenceLettersResponse(emptyList(), 0)
-        val total = sequence.size.toLong()
+        val total = sequence.letters.size.toLong()
         val safeOffset = offset.coerceAtLeast(0)
         val safeSize = size.coerceAtLeast(1)
-        val slice = sequence
+        val slice = sequence.letters
                 .drop(safeOffset)
                 .take(safeSize)
-                .map { it.toApiLetter(sequenceIdentifier) }
+                .map { it.toApiLetter(sequenceIdentifier, sequence.tenant) }
         return SequenceLettersResponse(slice, total)
     }
 
@@ -207,26 +334,26 @@ class DeadLetterManager @JvmOverloads constructor(
      * @return the number of letters that were actually evicted (0 when the id no longer resolves — e.g. the
      *         operator's view was stale).
      */
-    fun delete(processingGroup: String, sequenceIdentifier: String): Int {
+    fun delete(processingGroup: String, sequenceIdentifier: String, tenant: String? = null): Int = mutating(processingGroup) {
         val entry = dlqFor(processingGroup)
-        val sequence = findSequence(entry, sequenceIdentifier)
+        val sequence = findSequence(entry, sequenceIdentifier, tenant)
         if (sequence == null) {
             logger.warn(
                     "DLQ delete-sequence: no sequence in [{}] matches id [{}] — nothing to evict",
                     processingGroup, sequenceIdentifier,
             )
-            return 0
+            return@mutating 0
         }
         logger.info(
                 "DLQ delete-sequence: evicting {} letters from sequence [{}] in [{}]",
-                sequence.size, sequenceIdentifier, processingGroup,
+                sequence.letters.size, sequenceIdentifier, processingGroup,
         )
         var evicted = 0
-        sequence.forEach {
-            entry.dlq.evict(it, null).join()
+        sequence.letters.forEach { letter ->
+            inTenant(sequence.tenant) { context -> entry.dlq.evict(letter, context) }.join()
             evicted++
         }
-        return evicted
+        evicted
     }
 
     /**
@@ -234,74 +361,126 @@ class DeadLetterManager @JvmOverloads constructor(
      * [sequenceIdentifier]. Returns `true` when an eviction was performed; `false` indicates the
      * sequence id or message id no longer resolves (typically because the caller's view was stale).
      */
-    fun delete(processingGroup: String, sequenceIdentifier: String, messageIdentifier: String): Boolean {
+    fun delete(
+            processingGroup: String,
+            sequenceIdentifier: String,
+            messageIdentifier: String,
+            tenant: String? = null,
+    ): Boolean = mutating(processingGroup) {
         val entry = dlqFor(processingGroup)
-        val sequence = findSequence(entry, sequenceIdentifier)
+        val sequence = findSequence(entry, sequenceIdentifier, tenant)
         if (sequence == null) {
             logger.warn(
                     "DLQ delete-letter: no sequence in [{}] matches id [{}] (message id was [{}]) — caller view likely stale",
                     processingGroup, sequenceIdentifier, messageIdentifier,
             )
-            return false
+            return@mutating false
         }
-        val target = sequence.firstOrNull { it.message().identifier() == messageIdentifier }
+        val target = sequence.letters.firstOrNull { it.message().identifier() == messageIdentifier }
         if (target == null) {
             logger.warn(
                     "DLQ delete-letter: sequence [{}] in [{}] (size={}) does not contain message id [{}] — already evicted?",
-                    sequenceIdentifier, processingGroup, sequence.size, messageIdentifier,
+                    sequenceIdentifier, processingGroup, sequence.letters.size, messageIdentifier,
             )
-            return false
+            return@mutating false
         }
         logger.info(
                 "DLQ delete-letter: evicting message [{}] from sequence [{}] in [{}]",
                 messageIdentifier, sequenceIdentifier, processingGroup,
         )
-        entry.dlq.evict(target, null).join()
-        return true
+        inTenant(sequence.tenant) { context -> entry.dlq.evict(target, context) }.join()
+        true
     }
 
     /**
      * Resolves a DLQ sequence by the identifier this manager exposes through the API. Walks every sequence
-     * in the queue, derives each sequence's identifier via [sequenceIdentifierFor], and matches.
+     * in the queue, derives each sequence's identifier via [sequenceIdentifiersFor], and matches.
      *
      * When [dlqMode] is [AxoniqConsoleDlqMode.MASKED] the API-side identifier is a SHA-256 hash, so the
      * lookup compares the hash of each candidate id against the supplied [sequenceIdentifier] — this keeps
      * the delete/process operations working even when the operator only sees masked ids.
+     *
+     * Without a [tenant], a multi-tenant application searches every tenant. The same sequence identifier can exist
+     * in two tenants (an aggregate id is only unique per tenant), and acting on the wrong one is worse than not
+     * acting, so a match in more than one tenant is refused.
      */
     private fun findSequence(
             entry: DlqEntry,
             sequenceIdentifier: String,
-    ): List<DeadLetter<out EventMessage>>? {
-        val sequences = entry.dlq.deadLetters(null).join()
+            tenant: String?,
+    ): TenantSequence? {
+        val matches = mutableListOf<TenantSequence>()
         // Track candidates so we can log a diagnostic when nothing matches — the most common cause
         // is a stale identifier (the sequence's first letter has changed) or a mode mismatch between
         // the value the UI cached and what the manager now computes. Capped to keep log noise low.
         val candidates = mutableListOf<String>()
-        for (sequence in sequences) {
-            val letters = sequence.toList()
-            val firstLetter = letters.firstOrNull() ?: continue
-            val rawId = sequenceIdentifierFor(entry, firstLetter)
-            val candidateId = if (dlqMode == AxoniqConsoleDlqMode.MASKED) rawId.hashed() else rawId
-            if (candidateId == sequenceIdentifier) {
-                return letters
+        for (scope in tenantsFor(tenant)) {
+            val sequences = sequencesOf(entry, scope).filter { it.letters.isNotEmpty() }
+            val ids = apiSequenceIdsOf(entry, sequences.map { it.letters.first() }, scope)
+            for ((sequence, candidateId) in sequences.zip(ids)) {
+                if (candidateId == sequenceIdentifier) {
+                    matches += sequence
+                } else if (candidates.size < 5) {
+                    candidates.add(candidateId)
+                }
             }
-            if (candidates.size < 5) candidates.add(candidateId)
         }
-        logger.warn(
-                "DLQ findSequence: no sequence in [{}] matches id [{}] (dlqMode={}, scanned {} sequence(s), first {} candidate id(s): {}). Operator's view may be stale, or the first letter of the sequence has changed since the list query.",
-                entry.processingGroup,
-                sequenceIdentifier,
-                dlqMode,
-                candidates.size,
-                candidates.size,
-                candidates,
-        )
-        return null
+        if (matches.size > 1) {
+            throw IllegalArgumentException(
+                    "Sequence [$sequenceIdentifier] of [${entry.processingGroup}] exists in tenants " +
+                            "${matches.map { it.tenant }}; name the tenant to act on.")
+        }
+        if (matches.isEmpty()) {
+            logger.warn(
+                    "DLQ findSequence: no sequence in [{}] matches id [{}] (dlqMode={}, scanned {} sequence(s), first {} candidate id(s): {}). Operator's view may be stale, or the first letter of the sequence has changed since the list query.",
+                    entry.processingGroup,
+                    sequenceIdentifier,
+                    dlqMode,
+                    candidates.size,
+                    candidates.size,
+                    candidates,
+            )
+            return null
+        }
+        return matches.single()
     }
 
-    fun process(processingGroup: String, messageIdentifier: String): Boolean {
-        val processor = dlqFor(processingGroup).processor
-        return processor.process { it.message().identifier() == messageIdentifier }
+    /**
+     * The tenant to act on for the letter [messageIdentifier]: the one asked for, or in a multi-tenant application the
+     * tenant whose queue holds it. Message identifiers are unique, so unlike [findSequence] there is no ambiguity.
+     *
+     * @return [Located.Nowhere] when a multi-tenant application holds the letter in no tenant.
+     */
+    private fun locate(entry: DlqEntry, messageIdentifier: String, tenant: String?): Located {
+        if (tenant != null || tenancy == null) {
+            return Located.In(tenant)
+        }
+        val holder = tenantsFor(null).firstOrNull { scope ->
+            sequencesOf(entry, scope).any { sequence ->
+                sequence.letters.any { it.message().identifier() == messageIdentifier }
+            }
+        }
+        return if (holder == null) Located.Nowhere else Located.In(holder)
+    }
+
+    private sealed interface Located {
+        data class In(val tenant: String?) : Located
+        data object Nowhere : Located
+    }
+
+    private fun processMatching(
+            entry: DlqEntry,
+            tenant: String?,
+            filter: (DeadLetter<out EventMessage>) -> Boolean,
+    ): CompletableFuture<Boolean> =
+            inTenant(tenant) { context ->
+                if (context == null) entry.processor.process(filter) else entry.processor.process(filter, context)
+            }
+
+    fun process(processingGroup: String, messageIdentifier: String, tenant: String? = null): Boolean = mutating(processingGroup) {
+        val entry = dlqFor(processingGroup)
+        val located = locate(entry, messageIdentifier, tenant) as? Located.In ?: return@mutating false
+        processMatching(entry, located.tenant) { it.message().identifier() == messageIdentifier }
                 .get(60, TimeUnit.SECONDS)
     }
 
@@ -309,17 +488,20 @@ class DeadLetterManager @JvmOverloads constructor(
             processingGroup: String,
             maxMessages: Int? = null,
             timeoutSeconds: Long = 600,
-    ): Int {
-        val processor = dlqFor(processingGroup).processor
+            tenant: String? = null,
+    ): Int = mutating(processingGroup) {
+        val entry = dlqFor(processingGroup)
         var processed = 0
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
-        while (maxMessages == null || processed < maxMessages) {
-            if (System.nanoTime() > deadline) break
-            val didProcess = processor.process { true }.get(timeoutSeconds, TimeUnit.SECONDS)
-            if (!didProcess) break
-            processed++
+        for (scope in tenantsFor(tenant)) {
+            while (maxMessages == null || processed < maxMessages) {
+                if (System.nanoTime() > deadline) return@mutating processed
+                val didProcess = processMatching(entry, scope) { true }.get(timeoutSeconds, TimeUnit.SECONDS)
+                if (!didProcess) break
+                processed++
+            }
         }
-        return processed
+        processed
     }
 
     /**
@@ -342,23 +524,25 @@ class DeadLetterManager @JvmOverloads constructor(
             return AutomaticRetryCandidatesResponse(emptyList())
         }
         val now = Instant.now()
-        val candidates = entry.dlq.deadLetters(null).join()
-                .asSequence()
-                .mapNotNull { it.firstOrNull() }
-                .map { head -> head to head.platformRetries() }
-                .filter { (_, retries) -> retries < request.maxRetries }
-                .filter { (head, retries) -> !head.lastTouched().plus(request.backoffFor(retries)).isAfter(now) }
+        val due = tenantsFor(request.tenant).asSequence()
+                .flatMap { sequencesOf(entry, it) }
+                .mapNotNull { sequence -> sequence.letters.firstOrNull()?.let { sequence.tenant to it } }
+                .map { (tenant, head) -> Triple(tenant, head, head.platformRetries()) }
+                .filter { (_, _, retries) -> retries < request.maxRetries }
+                .filter { (_, head, retries) -> !head.lastTouched().plus(request.backoffFor(retries)).isAfter(now) }
                 .take(request.limit.coerceAtLeast(0))
-                .map { (head, retries) ->
-                    val rawId = sequenceIdentifierFor(entry, head)
-                    AutomaticRetryCandidate(
-                            sequenceIdentifier = if (dlqMode == AxoniqConsoleDlqMode.MASKED) rawId.hashed() else rawId,
-                            messageIdentifier = head.message().identifier(),
-                            retries = retries,
-                            lastTouched = head.lastTouched(),
-                    )
-                }
                 .toList()
+        val idsPerTenant = due.groupBy { (tenant, _, _) -> tenant }
+                .mapValues { (tenant, heads) -> apiSequenceIdsOf(entry, heads.map { it.second }, tenant).iterator() }
+        val candidates = due.map { (tenant, head, retries) ->
+            AutomaticRetryCandidate(
+                    sequenceIdentifier = idsPerTenant.getValue(tenant).next(),
+                    messageIdentifier = head.message().identifier(),
+                    retries = retries,
+                    lastTouched = head.lastTouched(),
+                    tenant = tenant,
+            )
+        }
         return AutomaticRetryCandidatesResponse(candidates)
     }
 
@@ -374,10 +558,11 @@ class DeadLetterManager @JvmOverloads constructor(
      * a retry round processes some letters before failing on a later one, the new head starts with
      * a fresh counter — the sequence made progress, so it earned a fresh budget.
      */
-    fun automatedRetry(processingGroup: String, messageIdentifier: String): Boolean {
+    fun automatedRetry(processingGroup: String, messageIdentifier: String, tenant: String? = null): Boolean = mutating(processingGroup) {
         val entry = dlqFor(processingGroup)
+        val located = locate(entry, messageIdentifier, tenant) as? Located.In ?: return@mutating false
         val success = try {
-            entry.processor.process { it.message().identifier() == messageIdentifier }
+            processMatching(entry, located.tenant) { it.message().identifier() == messageIdentifier }
                     .get(60, TimeUnit.SECONDS)
         } catch (e: TimeoutException) {
             // A sequence that fails by being slow must still consume its retry budget — otherwise
@@ -389,15 +574,15 @@ class DeadLetterManager @JvmOverloads constructor(
             false
         }
         if (!success) {
-            registerFailedAutomatedAttempt(entry, messageIdentifier)
+            registerFailedAutomatedAttempt(entry, messageIdentifier, located.tenant)
         }
-        return success
+        success
     }
 
-    private fun registerFailedAutomatedAttempt(entry: DlqEntry, messageIdentifier: String) {
-        val head = entry.dlq.deadLetters(null).join()
+    private fun registerFailedAutomatedAttempt(entry: DlqEntry, messageIdentifier: String, tenant: String?) {
+        val head = sequencesOf(entry, tenant)
                 .asSequence()
-                .mapNotNull { it.firstOrNull() }
+                .mapNotNull { it.letters.firstOrNull() }
                 .firstOrNull { it.message().identifier() == messageIdentifier }
         if (head == null) {
             logger.warn(
@@ -408,11 +593,13 @@ class DeadLetterManager @JvmOverloads constructor(
             return
         }
         val next = (head.platformRetries() + 1).toString()
-        entry.dlq.requeue(
-                head,
-                { letter -> letter.withDiagnostics { it.and(PLATFORM_RETRIES_DIAGNOSTIC, next) } },
-                null,
-        ).join()
+        inTenant(tenant) { context ->
+            entry.dlq.requeue(
+                    head,
+                    { letter -> letter.withDiagnostics { it.and(PLATFORM_RETRIES_DIAGNOSTIC, next) } },
+                    context,
+            )
+        }.join()
     }
 
     private fun DeadLetter<out EventMessage>.platformRetries(): Int =
@@ -427,21 +614,48 @@ class DeadLetterManager @JvmOverloads constructor(
         return Duration.ofMinutes(minutes)
     }
 
-    fun deleteAll(processingGroup: String, timeoutSeconds: Long = 600): Int {
+    fun deleteAll(processingGroup: String, timeoutSeconds: Long = 600, tenant: String? = null): Int = mutating(processingGroup) {
         val dlq = dlqFor(processingGroup).dlq
-        val totalCount = dlq.size(null).get(timeoutSeconds, TimeUnit.SECONDS).toInt()
-        dlq.clear(null).get(timeoutSeconds, TimeUnit.SECONDS)
-        return totalCount
+        tenantsFor(tenant).sumOf { scope ->
+            val count = inTenant(scope) { context -> dlq.size(context) }.get(timeoutSeconds, TimeUnit.SECONDS).toInt()
+            inTenant(scope) { context -> dlq.clear(context) }.get(timeoutSeconds, TimeUnit.SECONDS)
+            count
+        }
     }
+
+    /** Drops the group's cached tenant sizes even when [block] fails halfway through a batch it partly applied. */
+    private inline fun <R> mutating(processingGroup: String, block: () -> R): R =
+            try {
+                block()
+            } finally {
+                tenantSizes.invalidate(processingGroup)
+            }
 
     /**
      * Returns the DLQ entries belonging to the given processor — used by [ProcessorReportCreator] to surface DLQ size
      * per processing group in the processor report.
+     *
+     * In a multi-tenant application the per-tenant sizes are cached, because counting asks every tenant's queue
+     * (and makes the framework create one for each tenant) on every report. Letters the processor dead-letters
+     * itself show up after the TTL. A mutation made through this manager drops the cache of this node only: the
+     * other nodes of the application keep reporting their cached sizes until the TTL passes. A single-tenant
+     * application counts on every report as before: it is one call, and caching it would only add lag.
      */
     fun dlqInfoForProcessor(processorName: String): List<DlqInfo> =
             discover()
                     .filter { it.processorName == processorName }
-                    .map { DlqInfo(it.processingGroup, it.dlq.amountOfSequences(null).join()) }
+                    .map { entry ->
+                        val perTenant = tenancy?.let { t ->
+                            tenantSizes.get(entry.processingGroup) {
+                                t.tenants().associateWith { amountOfSequences(entry, it) }
+                            }
+                        }
+                        DlqInfo(
+                                processingGroup = entry.processingGroup,
+                                sequenceCount = perTenant?.values?.sum() ?: amountOfSequences(entry, null),
+                                sequenceCountPerTenant = perTenant,
+                        )
+                    }
 
     private fun dlqFor(processingGroup: String): DlqEntry =
             discover().firstOrNull { it.processingGroup == processingGroup }
@@ -525,44 +739,68 @@ class DeadLetterManager @JvmOverloads constructor(
     private fun discover(): List<DlqEntry> = entries ?: discoverEntries().also { entries = it }
 
     /**
-     * Resolves the sequence identifier for a letter by spinning up a real
-     * [org.axonframework.messaging.core.unitofwork.UnitOfWork] and calling
-     * [EventHandlingComponent.sequenceIdentifierFor] with its [ProcessingContext]. The UoW gives the
-     * decorator chain (including `SequenceCachingEventHandlingComponent`) a non-null context to read
-     * resources from, matching the framework's own invariants and avoiding the NPE that calling with
-     * `null` would trigger. The UoW does no real work — the lambda completes synchronously on the
-     * direct executor, so there's no scheduling cost. Result shape mirrors the AF4 implementation:
+     * Resolves the sequence identifier of each of [letters] by calling [EventHandlingComponent.sequenceIdentifierFor]
+     * with the [ProcessingContext] of a real [org.axonframework.messaging.core.unitofwork.UnitOfWork], which the
+     * decorator chain (including `SequenceCachingEventHandlingComponent`) needs to read resources from.
+     *
+     * All letters share one unit of work, bound to [tenant]: with a transactional factory every unit of work is a
+     * transaction, and one per letter made a page cost up to 25 and a sequence lookup one per sequence in the
+     * tenant. Sharing it is safe because `SequenceCachingEventHandlingComponent` caches per message identifier.
+     *
+     * Result shape mirrors the AF4 implementation:
      *  - String results are used verbatim;
      *  - non-String results fall back to `hashCode().toString()`;
      *  - if the EHC reference could not be captured at discovery time, or sequence resolution throws
      *    or returns `null`, the letter's message identifier is used so each letter still has a
      *    unique id.
      */
-    private fun sequenceIdentifierFor(
+    private fun sequenceIdentifiersFor(
             entry: DlqEntry,
-            letter: DeadLetter<out EventMessage>,
-    ): String {
-        val message = letter.message()
-        val ehc = entry.eventHandlingComponent ?: return message.identifier()
-        val raw: Any? = try {
+            letters: List<DeadLetter<out EventMessage>>,
+            tenant: String?,
+    ): List<String> {
+        val messages = letters.map { it.message() }
+        val ehc = entry.eventHandlingComponent
+        if (ehc == null || messages.isEmpty()) {
+            return messages.map { it.identifier() }
+        }
+        val raw: List<Any?> = try {
             unitOfWorkFactory.create().executeWithResult { context: ProcessingContext ->
-                CompletableFuture.completedFuture<Any?>(ehc.sequenceIdentifierFor(message, context))
+                tenant?.let { tenancy?.bind(context, it) }
+                CompletableFuture.completedFuture(messages.map { sequenceIdentifierOrNull(entry, ehc, it, context) })
             }.join()
         } catch (ex: Exception) {
             logger.debug(
-                    "Sequence identifier resolution threw for message [{}] in [{}] — falling back to message id.",
-                    message.identifier(), entry.processingGroup, ex,
+                    "Could not resolve sequence identifiers in [{}] — falling back to message ids.",
+                    entry.processingGroup, ex,
             )
-            null
+            messages.map { null }
         }
-        return when (raw) {
-            null -> message.identifier()
-            is String -> raw
-            else -> raw.hashCode().toString()
+        return messages.zip(raw) { message, id ->
+            when (id) {
+                null -> message.identifier()
+                is String -> id
+                else -> id.hashCode().toString()
+            }
         }
     }
 
-    private fun DeadLetter<out EventMessage>.toApiLetter(sequenceIdentifier: String): ApiDeadLetter {
+    private fun sequenceIdentifierOrNull(
+            entry: DlqEntry,
+            ehc: EventHandlingComponent,
+            message: EventMessage,
+            context: ProcessingContext,
+    ): Any? = try {
+        ehc.sequenceIdentifierFor(message, context)
+    } catch (ex: Exception) {
+        logger.debug(
+                "Sequence identifier resolution threw for message [{}] in [{}] — falling back to message id.",
+                message.identifier(), entry.processingGroup, ex,
+        )
+        null
+    }
+
+    private fun DeadLetter<out EventMessage>.toApiLetter(sequenceIdentifier: String, tenant: String?): ApiDeadLetter {
         val message = this.message()
         // `sequenceIdentifier` is expected to be in its final API form (hashed in MASKED, raw in FULL/
         // LIMITED). Hashing is the caller's responsibility — see `deadLetters(...)`.
@@ -579,6 +817,7 @@ class DeadLetterManager @JvmOverloads constructor(
                     lastTouched = this.lastTouched(),
                     diagnostics = emptyMap<String, Any>(),
                     sequenceIdentifier = sequenceIdentifier,
+                    tenant = tenant,
             )
             AxoniqConsoleDlqMode.LIMITED -> ApiDeadLetter(
                     messageIdentifier = message.identifier(),
@@ -590,6 +829,7 @@ class DeadLetterManager @JvmOverloads constructor(
                     lastTouched = this.lastTouched(),
                     diagnostics = this.diagnostics().filteredByWhitelist(),
                     sequenceIdentifier = sequenceIdentifier,
+                    tenant = tenant,
             )
             AxoniqConsoleDlqMode.FULL -> ApiDeadLetter(
                     messageIdentifier = message.identifier(),
@@ -601,6 +841,7 @@ class DeadLetterManager @JvmOverloads constructor(
                     lastTouched = this.lastTouched(),
                     diagnostics = this.diagnostics(),
                     sequenceIdentifier = sequenceIdentifier,
+                    tenant = tenant,
             )
         }
     }
@@ -643,5 +884,44 @@ class DeadLetterManager @JvmOverloads constructor(
      * Lightweight DTO returned to [ProcessorReportCreator] so it can populate per-processor DLQ size information
      * without exposing the full dead-letter API.
      */
-    data class DlqInfo(val processingGroup: String, val sequenceCount: Long)
+    data class DlqInfo(
+            val processingGroup: String,
+            val sequenceCount: Long,
+            val sequenceCountPerTenant: Map<String, Long>? = null,
+    )
+}
+
+/**
+ * Per processing group sizes, with an invalidation generation so a count that was running while a mutation
+ * invalidated the group is returned but not stored.
+ */
+private class TenantSizeCache(private val clock: Clock, private val ttl: Duration) {
+
+    private data class Entry(val sizes: Map<String, Long>, val expiresAt: Instant)
+
+    private val entries = ConcurrentHashMap<String, Entry>()
+    private val generation = AtomicLong()
+
+    fun get(processingGroup: String, count: () -> Map<String, Long>): Map<String, Long> =
+            peek(processingGroup) ?: refresh(processingGroup, count)
+
+    fun peek(processingGroup: String): Map<String, Long>? =
+            entries[processingGroup]?.takeIf { clock.instant().isBefore(it.expiresAt) }?.sizes
+
+    fun refresh(processingGroup: String, count: () -> Map<String, Long>): Map<String, Long> {
+        val now = clock.instant()
+        val startedAt = generation.get()
+        val sizes = count()
+        entries.compute(processingGroup) { _, current ->
+            if (generation.get() == startedAt) Entry(sizes = sizes, expiresAt = now.plus(ttl)) else current
+        }
+        return sizes
+    }
+
+    fun invalidate(processingGroup: String) {
+        entries.compute(processingGroup) { _, _ ->
+            generation.incrementAndGet()
+            null
+        }
+    }
 }

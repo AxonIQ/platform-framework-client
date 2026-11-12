@@ -21,6 +21,7 @@ import org.axonframework.common.configuration.DecoratorDefinition
 import org.axonframework.eventsourcing.configuration.EventSourcingConfigurer
 import org.axonframework.messaging.core.MessageType
 import org.axonframework.messaging.core.QualifiedName
+import org.axonframework.messaging.core.sequencing.PropertySequencingPolicy
 import org.axonframework.messaging.core.sequencing.SequencingPolicy
 import org.axonframework.messaging.eventhandling.EventHandlingComponent
 import org.axonframework.messaging.eventhandling.EventMessage
@@ -70,6 +71,8 @@ class RSocketDlqResponderIntegrationTest {
         private const val PROCESSOR_NAME = "audit"
         private const val COMPONENT_NAME = "AuditProjector"
         private const val SEQUENCE_ID = "tenant-42"
+        private const val PROPERTY_PROCESSOR_NAME = "ledger"
+        private const val PROPERTY_COMPONENT_NAME = "LedgerProjector"
         private val EVENT_NAME = QualifiedName(TestEvent::class.java)
     }
 
@@ -100,36 +103,12 @@ class RSocketDlqResponderIntegrationTest {
                 .messaging { messaging ->
                     messaging.eventProcessing { eventProcessing ->
                         eventProcessing.pooledStreaming { psep ->
-                            psep.processor(
-                                    PooledStreamingEventProcessorModule(PROCESSOR_NAME)
-                                            .eventHandlingComponents { components ->
-                                                components.declarative(COMPONENT_NAME) { _ ->
-                                                    SequenceOverridingEventHandlingComponent(
-                                                            constantSequencingPolicy(),
-                                                            SimpleEventHandlingComponent.create(COMPONENT_NAME),
-                                                    )
-                                                }
-                                            }
-                                            .customized { _, cfg ->
-                                                cfg.extend(
-                                                        DeadLetterQueueConfiguration::class.java,
-                                                ) { DeadLetterQueueConfiguration().enabled() }
-                                            }
-                                            .componentRegistry { moduleRegistry ->
-                                                moduleRegistry.registerDecorator(
-                                                        DecoratorDefinition.forType(EventHandlingComponent::class.java)
-                                                                .with { cc, _, delegate ->
-                                                                    AxoniqPlatformEventHandlingComponent(
-                                                                            delegate,
-                                                                            PROCESSOR_NAME,
-                                                                            cc.getComponent(HandlerMetricsRegistry::class.java),
-                                                                            cc.getComponent(ProcessorMetricsRegistry::class.java),
-                                                                    )
-                                                                }
-                                                                .order(0),
-                                                )
-                                            },
-                            )
+                            psep.processor(processorWithDlq(PROCESSOR_NAME, COMPONENT_NAME, constantSequencingPolicy()))
+                            psep.processor(processorWithDlq(
+                                    PROPERTY_PROCESSOR_NAME,
+                                    PROPERTY_COMPONENT_NAME,
+                                    PropertySequencingPolicy<TestEvent, String>(TestEvent::class.java, "value"),
+                            ))
                         }
                     }
                 }
@@ -139,7 +118,7 @@ class RSocketDlqResponderIntegrationTest {
         manager.start()
         // Push two letters with the same policy-derived sequence id so we can test pagination and
         // confirm the id remains stable as letters get evicted.
-        val dlq = resolveDlq()
+        val dlq = resolveDlq(PROCESSOR_NAME, COMPONENT_NAME)
         enqueue(dlq, sequenceId = SEQUENCE_ID, "letter-1")
         enqueue(dlq, sequenceId = SEQUENCE_ID, "letter-2")
         enqueue(dlq, sequenceId = SEQUENCE_ID, "letter-3")
@@ -224,6 +203,15 @@ class RSocketDlqResponderIntegrationTest {
         assertEquals(0L, manager.infoFor(PROCESSOR_NAME).single().dlqSize)
     }
 
+    @Test
+    fun `a property-based policy yields the property as the sequence id, which needs the event converter`() {
+        enqueue(resolveDlq(PROPERTY_PROCESSOR_NAME, PROPERTY_COMPONENT_NAME), sequenceId = "acc-7", "acc-7")
+
+        val letter = manager.deadLetters(PROPERTY_PROCESSOR_NAME).sequences.single().single()
+
+        assertEquals("acc-7", letter.sequenceIdentifier)
+    }
+
     // -----------------------------------------------------------------------------------------
     //  Helpers
     // -----------------------------------------------------------------------------------------
@@ -235,8 +223,8 @@ class RSocketDlqResponderIntegrationTest {
      * [DeadLetterQueueConfiguration] in [boot].
      */
     @Suppress("UNCHECKED_CAST")
-    private fun resolveDlq(): SequencedDeadLetterQueue<EventMessage> {
-        val expectedName = "DeadLetterQueue[EventHandlingComponent[$PROCESSOR_NAME][$COMPONENT_NAME]]"
+    private fun resolveDlq(processor: String, component: String): SequencedDeadLetterQueue<EventMessage> {
+        val expectedName = "DeadLetterQueue[EventHandlingComponent[$processor][$component]]"
         val dlq = configuration.moduleConfigurations.asSequence()
                 .flatMap { it.getComponents(SequencedDeadLetterQueue::class.java).entries.asSequence() }
                 .firstOrNull { it.key == expectedName }
@@ -267,6 +255,38 @@ class RSocketDlqResponderIntegrationTest {
      * end up in a single sequence — that's what lets the assertions about pagination and stable
      * sequence id work.
      */
+    private fun processorWithDlq(
+            processor: String,
+            component: String,
+            policy: SequencingPolicy<in EventMessage>,
+    ): PooledStreamingEventProcessorModule =
+            PooledStreamingEventProcessorModule(processor)
+                    .eventHandlingComponents { components ->
+                        components.declarative(component) { _ ->
+                            SequenceOverridingEventHandlingComponent(
+                                    policy,
+                                    SimpleEventHandlingComponent.create(component),
+                            )
+                        }
+                    }
+                    .customized { _, cfg ->
+                        cfg.extend(DeadLetterQueueConfiguration::class.java) { DeadLetterQueueConfiguration().enabled() }
+                    }
+                    .componentRegistry { moduleRegistry ->
+                        moduleRegistry.registerDecorator(
+                                DecoratorDefinition.forType(EventHandlingComponent::class.java)
+                                        .with { cc, _, delegate ->
+                                            AxoniqPlatformEventHandlingComponent(
+                                                    delegate,
+                                                    processor,
+                                                    cc.getComponent(HandlerMetricsRegistry::class.java),
+                                                    cc.getComponent(ProcessorMetricsRegistry::class.java),
+                                            )
+                                        }
+                                        .order(0),
+                        )
+                    }
+
     private fun constantSequencingPolicy(): SequencingPolicy<EventMessage> =
             SequencingPolicy { _, _ -> Optional.of(SEQUENCE_ID) }
 }

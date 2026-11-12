@@ -12,9 +12,18 @@ import io.axoniq.platform.framework.api.ProcessingGroupStatus
 import io.mockk.every
 import io.mockk.mockk
 import org.axonframework.common.configuration.Configuration
+import io.axoniq.platform.framework.tenancy.PlatformTenancy
+import org.axonframework.messaging.eventhandling.processing.EventProcessor
+import org.axonframework.messaging.eventhandling.processing.streaming.pooled.PooledStreamingEventProcessor
+import org.axonframework.messaging.eventhandling.processing.streaming.segmenting.EventTrackerStatus
+import org.axonframework.messaging.eventhandling.processing.streaming.segmenting.Segment
+import org.axonframework.messaging.eventhandling.processing.streaming.token.TrackingToken
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import java.util.Optional
+import java.util.OptionalLong
 
 /**
  * Focused unit tests for the [ProcessingGroupInfoSource] integration in [ProcessorReportCreator].
@@ -29,49 +38,92 @@ import java.util.Optional
  */
 class ProcessorReportCreatorTest {
 
-    @Test
-    fun `processingGroupsFor returns empty when no ProcessingGroupInfoSource is registered`() {
-        val config = baseConfigurationWith(infoSource = Optional.empty())
-        val creator = ProcessorReportCreator(config)
+    @Nested
+    inner class ProcessingGroups {
 
-        val result = invokeProcessingGroupsFor(creator, "orders")
+        @Test
+        fun `processingGroupsFor returns empty when no ProcessingGroupInfoSource is registered`() {
+            val config = baseConfigurationWith(infoSource = Optional.empty())
+            val creator = ProcessorReportCreator(config)
 
-        assertEquals(emptyList<ProcessingGroupStatus>(), result)
+            val result = invokeProcessingGroupsFor(creator, "orders")
+
+            assertEquals(emptyList<ProcessingGroupStatus>(), result)
+        }
+
+        @Test
+        fun `processingGroupsFor maps source infos to ProcessingGroupStatus entries`() {
+            val source = mockk<ProcessingGroupInfoSource>()
+            every { source.infoFor("orders") } returns listOf(
+                    ProcessingGroupInfoSource.ProcessingGroupInfo("orders", 3L),
+                    ProcessingGroupInfoSource.ProcessingGroupInfo("orders::audit", 0L),
+            )
+            val config = baseConfigurationWith(infoSource = Optional.of(source))
+            val creator = ProcessorReportCreator(config)
+
+            val result = invokeProcessingGroupsFor(creator, "orders")
+
+            assertEquals(
+                    listOf(
+                            ProcessingGroupStatus("orders", 3L),
+                            ProcessingGroupStatus("orders::audit", 0L),
+                    ),
+                    result,
+            )
+        }
+
+        @Test
+        fun `processingGroupsFor swallows source exceptions and returns empty list`() {
+            // A failing probe must not break processor reporting — the warning is logged but the
+            // caller receives an empty list and the rest of the report still renders.
+            val source = mockk<ProcessingGroupInfoSource>()
+            every { source.infoFor("orders") } throws RuntimeException("boom")
+            val config = baseConfigurationWith(infoSource = Optional.of(source))
+            val creator = ProcessorReportCreator(config)
+
+            val result = invokeProcessingGroupsFor(creator, "orders")
+
+            assertEquals(emptyList<ProcessingGroupStatus>(), result)
+        }
     }
 
-    @Test
-    fun `processingGroupsFor maps source infos to ProcessingGroupStatus entries`() {
-        val source = mockk<ProcessingGroupInfoSource>()
-        every { source.infoFor("orders") } returns listOf(
-                ProcessingGroupInfoSource.ProcessingGroupInfo("orders", 3L),
-                ProcessingGroupInfoSource.ProcessingGroupInfo("orders::audit", 0L),
-        )
-        val config = baseConfigurationWith(infoSource = Optional.of(source))
-        val creator = ProcessorReportCreator(config)
+    @Nested
+    inner class TenantPositions {
 
-        val result = invokeProcessingGroupsFor(creator, "orders")
+        private val token = mockk<TrackingToken>()
 
-        assertEquals(
-                listOf(
-                        ProcessingGroupStatus("orders", 3L),
-                        ProcessingGroupStatus("orders::audit", 0L),
-                ),
-                result,
-        )
-    }
+        private fun creatorWith(tenancy: PlatformTenancy?): ProcessorReportCreator {
+            val processor = mockk<PooledStreamingEventProcessor>(relaxed = true)
+            val status = mockk<EventTrackerStatus>(relaxed = true)
+            every { status.segment } returns Segment.ROOT_SEGMENT
+            every { status.trackingToken } returns token
+            every { status.currentPosition } returns OptionalLong.of(5)
+            every { status.resetPosition } returns OptionalLong.empty()
+            every { processor.processingStatus() } returns mapOf(0 to status)
+            every { processor.tokenStoreIdentifier } returns "store"
+            val config = baseConfigurationWith(infoSource = Optional.empty())
+            every { config.getComponents(EventProcessor::class.java) } returns mapOf("notifier" to processor)
+            return ProcessorReportCreator(config) { tenancy }
+        }
 
-    @Test
-    fun `processingGroupsFor swallows source exceptions and returns empty list`() {
-        // A failing probe must not break processor reporting — the warning is logged but the
-        // caller receives an empty list and the rest of the report still renders.
-        val source = mockk<ProcessingGroupInfoSource>()
-        every { source.infoFor("orders") } throws RuntimeException("boom")
-        val config = baseConfigurationWith(infoSource = Optional.of(source))
-        val creator = ProcessorReportCreator(config)
+        @Test
+        fun `reports the position of every tenant next to their sum`() {
+            val tenancy = mockk<PlatformTenancy>()
+            every { tenancy.positionsIn(token) } returns mapOf("tenant-a" to 2L, "tenant-b" to 3L)
 
-        val result = invokeProcessingGroupsFor(creator, "orders")
+            val segment = creatorWith(tenancy).createReport().processors.single().segments.single()
 
-        assertEquals(emptyList<ProcessingGroupStatus>(), result)
+            assertEquals(5L, segment.position)
+            assertEquals(mapOf("tenant-a" to 2L, "tenant-b" to 3L), segment.tenantPositions)
+        }
+
+        @Test
+        fun `reports no tenant positions for a single-tenant application`() {
+            val segment = creatorWith(tenancy = null).createReport().processors.single().segments.single()
+
+            assertEquals(5L, segment.position)
+            assertNull(segment.tenantPositions)
+        }
     }
 
     /**

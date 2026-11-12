@@ -14,15 +14,26 @@ import io.axoniq.framework.messaging.deadletter.SequencedDeadLetterProcessor
 import io.axoniq.framework.messaging.deadletter.SequencedDeadLetterQueue
 import io.axoniq.platform.framework.api.AutomaticRetryBackoff
 import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode
+import io.axoniq.platform.framework.api.DeadLetterResponse
 import io.axoniq.platform.framework.api.DeadLettersForAutomaticRetryRequest
+import io.axoniq.platform.framework.tenancy.PlatformTenancy
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
 import org.apache.commons.codec.digest.DigestUtils
 import org.axonframework.common.configuration.Configuration
+import org.axonframework.messaging.core.Context
+import org.axonframework.messaging.core.EmptyApplicationContext
 import org.axonframework.messaging.core.Metadata
 import org.axonframework.messaging.core.MessageType
+import org.axonframework.messaging.core.unitofwork.ProcessingContext
+import org.axonframework.messaging.core.unitofwork.SimpleUnitOfWorkFactory
+import org.axonframework.messaging.core.unitofwork.TransactionalUnitOfWorkFactory
+import org.axonframework.messaging.core.unitofwork.UnitOfWorkFactory
+import org.axonframework.messaging.core.unitofwork.transaction.Transaction
+import org.axonframework.messaging.core.unitofwork.transaction.TransactionManager
+import org.axonframework.messaging.eventhandling.processing.streaming.token.TrackingToken
 import org.axonframework.messaging.eventhandling.EventHandlingComponent
 import org.axonframework.messaging.eventhandling.EventMessage
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -32,8 +43,11 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.time.ZoneId
+import java.time.ZoneOffset
 import java.util.Optional
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeoutException
@@ -834,9 +848,545 @@ class DeadLetterManagerTest {
             val letter = fakeLetter("m1")
 
             val thrown = assertThrows(java.lang.reflect.InvocationTargetException::class.java) {
-                toApiLetter.invoke(manager, letter, "any-id")
+                toApiLetter.invoke(manager, letter, "any-id", null)
             }
             assertTrue(thrown.cause is IllegalStateException)
+        }
+    }
+
+    @Nested
+    inner class MultiTenant {
+
+        private val tenantKey = Context.ResourceKey.withLabel<String>("tenant")
+        private val tenancy = object : PlatformTenancy {
+            override fun tenants() = listOf("tenant-a", "tenant-b")
+            override fun bind(context: ProcessingContext, tenantId: String) {
+                context.putResource(tenantKey, tenantId)
+            }
+            override fun positionsIn(token: TrackingToken): Map<String, Long>? = null
+        }
+        private val evicted = mutableListOf<Pair<String, String>>()
+        private val cleared = mutableListOf<String>()
+        private val processedIn = mutableListOf<String>()
+
+        private fun tenantOf(context: ProcessingContext?): String =
+                context?.getResource(tenantKey) ?: error("A tenant-routed queue needs a tenant on the context")
+
+        /** Behaves like the framework's tenant-routing queue: every call is answered by the context's tenant. */
+        @Suppress("UNCHECKED_CAST")
+        private fun tenantRoutedDlq(
+                perTenant: Map<String, List<List<DeadLetter<EventMessage>>>>,
+        ): SequencedDeadLetterQueue<EventMessage> {
+            val dlq = mockk<SequencedDeadLetterQueue<EventMessage>>(relaxed = true)
+            every { dlq.deadLetters(any()) } answers {
+                CompletableFuture.completedFuture(
+                        perTenant[tenantOf(firstArg())].orEmpty() as Iterable<Iterable<DeadLetter<out EventMessage>>>)
+            }
+            every { dlq.amountOfSequences(any()) } answers {
+                CompletableFuture.completedFuture(perTenant[tenantOf(firstArg())].orEmpty().size.toLong())
+            }
+            every { dlq.size(any()) } answers {
+                CompletableFuture.completedFuture(perTenant[tenantOf(firstArg())].orEmpty().sumOf { it.size }.toLong())
+            }
+            every { dlq.evict(any<DeadLetter<EventMessage>>(), any()) } answers {
+                evicted += tenantOf(secondArg()) to firstArg<DeadLetter<EventMessage>>().message().identifier()
+                CompletableFuture.completedFuture(null)
+            }
+            every { dlq.clear(any()) } answers {
+                cleared += tenantOf(firstArg())
+                CompletableFuture.completedFuture(null)
+            }
+            return dlq
+        }
+
+        /** Sequences by payload, so the same account id can be dead-lettered in two tenants. */
+        @Suppress("UNCHECKED_CAST")
+        private fun accountPolicy(): EventHandlingComponent {
+            val ehc = ehcWithPolicy { it.payload() }
+            every {
+                (ehc as SequencedDeadLetterProcessor<EventMessage>).process(any(), any<ProcessingContext>())
+            } answers {
+                processedIn += tenantOf(secondArg())
+                CompletableFuture.completedFuture(true)
+            }
+            return ehc
+        }
+
+        private val queue = "DeadLetterQueue[EventHandlingComponent[notifier][Notifier]]"
+
+        @Test
+        fun `lists the sequences of every tenant and tags each letter with its tenant`() {
+            val manager = managerWith(
+                    queue to tenantRoutedDlq(mapOf(
+                            "tenant-a" to listOf(listOf(fakeLetter("a1", payload = "acc-1"))),
+                            "tenant-b" to listOf(listOf(fakeLetter("b1", payload = "acc-2"))),
+                    )),
+                    ehc = accountPolicy(),
+                    tenancy = tenancy,
+            )
+
+            val response = manager.deadLetters("notifier")
+
+            assertEquals(2, response.totalCount)
+            assertEquals(
+                    listOf("tenant-a" to "acc-1", "tenant-b" to "acc-2"),
+                    response.sequences.map { it.single().tenant to it.single().sequenceIdentifier },
+            )
+        }
+
+        @Test
+        fun `lists only the tenant asked for`() {
+            val manager = managerWith(
+                    queue to tenantRoutedDlq(mapOf(
+                            "tenant-a" to listOf(listOf(fakeLetter("a1", payload = "acc-1"))),
+                            "tenant-b" to listOf(listOf(fakeLetter("b1", payload = "acc-2"))),
+                    )),
+                    ehc = accountPolicy(),
+                    tenancy = tenancy,
+            )
+
+            val response = manager.deadLetters("notifier", tenant = "tenant-b")
+
+            assertEquals(1, response.totalCount)
+            assertEquals("b1", response.sequences.single().single().messageIdentifier)
+        }
+
+        @Test
+        fun `reports the queue size per tenant and in total`() {
+            val manager = managerWith(
+                    queue to tenantRoutedDlq(mapOf(
+                            "tenant-a" to listOf(listOf(fakeLetter("a1", payload = "acc-1"))),
+                            "tenant-b" to listOf(
+                                    listOf(fakeLetter("b1", payload = "acc-2")),
+                                    listOf(fakeLetter("b2", payload = "acc-3")),
+                            ),
+                    )),
+                    ehc = accountPolicy(),
+                    tenancy = tenancy,
+            )
+
+            val info = manager.infoFor("notifier").single()
+
+            assertEquals(3, info.dlqSize)
+            assertEquals(mapOf("tenant-a" to 1L, "tenant-b" to 2L), info.dlqSizePerTenant)
+        }
+
+        @Test
+        fun `deletes a sequence in the tenant that holds it`() {
+            val manager = managerWith(
+                    queue to tenantRoutedDlq(mapOf(
+                            "tenant-a" to listOf(listOf(fakeLetter("a1", payload = "acc-1"))),
+                            "tenant-b" to listOf(listOf(fakeLetter("b1", payload = "acc-2"))),
+                    )),
+                    ehc = accountPolicy(),
+                    tenancy = tenancy,
+            )
+
+            assertEquals(1, manager.delete("notifier", "acc-2"))
+            assertEquals(listOf("tenant-b" to "b1"), evicted)
+        }
+
+        @Test
+        fun `refuses to guess when a sequence id exists in two tenants, and acts on the tenant named`() {
+            val manager = managerWith(
+                    queue to tenantRoutedDlq(mapOf(
+                            "tenant-a" to listOf(listOf(fakeLetter("a1", payload = "acc-1"))),
+                            "tenant-b" to listOf(listOf(fakeLetter("b1", payload = "acc-1"))),
+                    )),
+                    ehc = accountPolicy(),
+                    tenancy = tenancy,
+            )
+
+            assertThrows(IllegalArgumentException::class.java) { manager.delete("notifier", "acc-1") }
+            assertTrue(evicted.isEmpty())
+
+            manager.delete("notifier", "acc-1", tenant = "tenant-a")
+            assertEquals(listOf("tenant-a" to "a1"), evicted)
+        }
+
+        @Test
+        fun `processes a letter in the tenant that holds it`() {
+            val manager = managerWith(
+                    queue to tenantRoutedDlq(mapOf(
+                            "tenant-a" to listOf(listOf(fakeLetter("a1", payload = "acc-1"))),
+                            "tenant-b" to listOf(listOf(fakeLetter("b1", payload = "acc-2"))),
+                    )),
+                    ehc = accountPolicy(),
+                    tenancy = tenancy,
+            )
+
+            assertTrue(manager.process("notifier", "b1"))
+            assertEquals(listOf("tenant-b"), processedIn)
+        }
+
+        @Test
+        fun `does not process a letter that no tenant holds`() {
+            val manager = managerWith(
+                    queue to tenantRoutedDlq(mapOf("tenant-a" to listOf(listOf(fakeLetter("a1", payload = "acc-1"))))),
+                    ehc = accountPolicy(),
+                    tenancy = tenancy,
+            )
+
+            assertFalse(manager.process("notifier", "unknown"))
+            assertTrue(processedIn.isEmpty())
+        }
+
+        @Test
+        fun `clears every tenant`() {
+            val manager = managerWith(
+                    queue to tenantRoutedDlq(mapOf(
+                            "tenant-a" to listOf(listOf(fakeLetter("a1", payload = "acc-1"))),
+                            "tenant-b" to listOf(listOf(fakeLetter("b1", payload = "acc-2"), fakeLetter("b2", payload = "acc-2"))),
+                    )),
+                    ehc = accountPolicy(),
+                    tenancy = tenancy,
+            )
+
+            assertEquals(3, manager.deleteAll("notifier"))
+            assertEquals(listOf("tenant-a", "tenant-b"), cleared)
+        }
+
+        @Test
+        fun `runs tenant-scoped calls in a unit of work from the configured factory`() {
+            var open = 0
+            var committed = 0
+            val transactionManager = TransactionManager {
+                open++
+                object : Transaction {
+                    override fun commit() {
+                        open--
+                        committed++
+                    }
+
+                    override fun rollback() {
+                        open--
+                    }
+                }
+            }
+            val openDuringCall = mutableListOf<Int>()
+            val dlq = tenantRoutedDlq(mapOf(
+                    "tenant-a" to listOf(listOf(fakeLetter("a1", payload = "acc-1"))),
+                    "tenant-b" to listOf(listOf(fakeLetter("b1", payload = "acc-2"))),
+            ))
+            every { dlq.clear(any()) } answers {
+                openDuringCall += open
+                cleared += tenantOf(firstArg())
+                CompletableFuture.completedFuture(null)
+            }
+            val manager = managerWith(
+                    queue to dlq,
+                    ehc = accountPolicy(),
+                    tenancy = tenancy,
+                    unitOfWorkFactory = TransactionalUnitOfWorkFactory(
+                            transactionManager,
+                            SimpleUnitOfWorkFactory(EmptyApplicationContext.INSTANCE),
+                    ),
+            )
+
+            manager.deleteAll("notifier")
+
+            assertEquals(listOf("tenant-a", "tenant-b"), cleared)
+            assertEquals(listOf(1, 1), openDuringCall)
+            assertEquals(0, open)
+            assertEquals(4, committed)
+        }
+
+        @Nested
+        inner class SequenceIdUnitsOfWork {
+
+            private val contextsPerTenant = mutableMapOf<String, MutableSet<ProcessingContext>>()
+            private val ehc = accountPolicy().also { ehc ->
+                every { ehc.sequenceIdentifierFor(any(), any()) } answers {
+                    val context = secondArg<ProcessingContext>()
+                    contextsPerTenant.getOrPut(tenantOf(context)) { mutableSetOf() } += context
+                    firstArg<EventMessage>().payload() as Any
+                }
+            }
+            private val manager = managerWith(
+                    queue to tenantRoutedDlq(mapOf(
+                            "tenant-a" to listOf(
+                                    listOf(fakeLetter("a1", payload = "acc-1")),
+                                    listOf(fakeLetter("a2", payload = "acc-2")),
+                                    listOf(fakeLetter("a3", payload = "acc-3")),
+                            ),
+                            "tenant-b" to listOf(
+                                    listOf(fakeLetter("b1", payload = "acc-4")),
+                                    listOf(fakeLetter("b2", payload = "acc-5")),
+                            ),
+                    )),
+                    ehc = ehc,
+                    tenancy = tenancy,
+            )
+
+            private fun unitsOfWorkPerTenant() = contextsPerTenant.mapValues { it.value.size }
+
+            @Test
+            fun `resolves the ids of a page in one unit of work per tenant`() {
+                val response = manager.deadLetters("notifier")
+
+                assertEquals(
+                        listOf("acc-1", "acc-2", "acc-3", "acc-4", "acc-5"),
+                        response.sequences.map { it.single().sequenceIdentifier },
+                )
+                assertEquals(mapOf("tenant-a" to 1, "tenant-b" to 1), unitsOfWorkPerTenant())
+            }
+
+            @Test
+            fun `finds a sequence among many in one unit of work`() {
+                assertEquals(1, manager.delete("notifier", "acc-3", tenant = "tenant-a"))
+
+                assertEquals(listOf("tenant-a" to "a3"), evicted)
+                assertEquals(mapOf("tenant-a" to 1), unitsOfWorkPerTenant())
+            }
+
+            @Test
+            fun `gives retry candidates the ids of their own tenant`() {
+                val candidates = manager.deadLettersForAutomaticRetry(DeadLettersForAutomaticRetryRequest(
+                        processingGroup = "notifier",
+                        backoff = AutomaticRetryBackoff.CONSISTENT,
+                        backoffMinutes = 0,
+                        maxRetries = 3,
+                        limit = 10,
+                )).candidates
+
+                assertEquals(
+                        listOf(
+                                "tenant-a" to "acc-1", "tenant-a" to "acc-2", "tenant-a" to "acc-3",
+                                "tenant-b" to "acc-4", "tenant-b" to "acc-5",
+                        ),
+                        candidates.map { it.tenant to it.sequenceIdentifier },
+                )
+                assertEquals(mapOf("tenant-a" to 1, "tenant-b" to 1), unitsOfWorkPerTenant())
+            }
+
+            @Test
+            fun `falls back to the message id for one letter without affecting the others`() {
+                every { ehc.sequenceIdentifierFor(any(), any()) } answers {
+                    val payload = firstArg<EventMessage>().payload()
+                    if (payload == "acc-2") throw IllegalStateException("policy failed") else payload as Any
+                }
+
+                val response = manager.deadLetters("notifier", tenant = "tenant-a")
+
+                assertEquals(listOf("acc-1", "a2", "acc-3"), response.sequences.map { it.single().sequenceIdentifier })
+            }
+        }
+
+        @Nested
+        inner class TenantSizeCache {
+
+            private val clock = MutableClock()
+            private val tenantA = mutableListOf(listOf(fakeLetter("a1", payload = "acc-1")))
+            private val dlq = tenantRoutedDlq(mapOf(
+                    "tenant-a" to tenantA,
+                    "tenant-b" to listOf(listOf(fakeLetter("b1", payload = "acc-2"))),
+            ))
+            private val manager = managerWith(queue to dlq, ehc = accountPolicy(), tenancy = tenancy, clock = clock)
+
+            @Test
+            fun `reuses the sizes within the TTL`() {
+                manager.infoFor("notifier")
+                tenantA += listOf(fakeLetter("a2", payload = "acc-3"))
+                clock.now = clock.now.plusSeconds(29)
+
+                val info = manager.infoFor("notifier").single()
+
+                assertEquals(mapOf("tenant-a" to 1L, "tenant-b" to 1L), info.dlqSizePerTenant)
+                verify(exactly = 2) { dlq.amountOfSequences(any()) }
+            }
+
+            @Test
+            fun `counts again once the TTL has passed`() {
+                manager.infoFor("notifier")
+                tenantA += listOf(fakeLetter("a2", payload = "acc-3"))
+                clock.now = clock.now.plusSeconds(30)
+
+                val info = manager.infoFor("notifier").single()
+
+                assertEquals(mapOf("tenant-a" to 2L, "tenant-b" to 1L), info.dlqSizePerTenant)
+                assertEquals(3, info.dlqSize)
+                verify(exactly = 4) { dlq.amountOfSequences(any()) }
+            }
+
+            @Test
+            fun `counts again right after a mutation`() {
+                manager.infoFor("notifier")
+                every { dlq.evict(any<DeadLetter<EventMessage>>(), any()) } answers {
+                    evicted += tenantOf(secondArg()) to firstArg<DeadLetter<EventMessage>>().message().identifier()
+                    tenantA.clear()
+                    CompletableFuture.completedFuture(null)
+                }
+
+                manager.delete("notifier", "acc-1", tenant = "tenant-a")
+                val info = manager.infoFor("notifier").single()
+
+                assertEquals(mapOf("tenant-a" to 0L, "tenant-b" to 1L), info.dlqSizePerTenant)
+            }
+
+            @Test
+            fun `counts again after a mutation that fails halfway`() {
+                manager.infoFor("notifier")
+                every { dlq.clear(any()) } answers {
+                    tenantA.clear()
+                    CompletableFuture.failedFuture<Void>(IllegalStateException("queue store went away"))
+                }
+
+                assertThrows(Exception::class.java) { manager.deleteAll("notifier") }
+                val info = manager.infoFor("notifier").single()
+
+                assertEquals(0L, info.dlqSizePerTenant?.get("tenant-a"))
+            }
+        }
+
+        @Nested
+        inner class AllTenantsPaging {
+
+            private val tenantA = tenantDlq(prefix = "a", sequences = 2)
+            private val tenantB = tenantDlq(prefix = "b", sequences = 3)
+            private val tenantC = tenantDlq(prefix = "c", sequences = 1)
+            private val perTenant = mutableMapOf("tenant-a" to tenantA, "tenant-b" to tenantB, "tenant-c" to tenantC)
+            private val tenants = mutableListOf("tenant-c", "tenant-a", "tenant-b")
+            private val unorderedTenancy = object : PlatformTenancy {
+                override fun tenants() = tenants.toList()
+                override fun bind(context: ProcessingContext, tenantId: String) = tenancy.bind(context, tenantId)
+                override fun positionsIn(token: TrackingToken): Map<String, Long>? = null
+            }
+            private val clock = MutableClock()
+            private val manager = managerWith(
+                    queue to routingDlq(), ehc = accountPolicy(), tenancy = unorderedTenancy, clock = clock)
+
+            @Suppress("UNCHECKED_CAST")
+            private fun tenantDlq(prefix: String, sequences: Int): SequencedDeadLetterQueue<EventMessage> {
+                val dlq = mockk<SequencedDeadLetterQueue<EventMessage>>(relaxed = true)
+                val letters = (1..sequences).map { listOf(fakeLetter("$prefix$it", payload = "acc-$prefix$it")) }
+                every { dlq.deadLetters(any()) } returns CompletableFuture.completedFuture(
+                        letters as Iterable<Iterable<DeadLetter<out EventMessage>>>)
+                every { dlq.amountOfSequences(any()) } returns CompletableFuture.completedFuture(letters.size.toLong())
+                return dlq
+            }
+
+            /** Hands every call to the queue of the context's tenant, as the framework's tenant-routing queue does. */
+            private fun routingDlq(): SequencedDeadLetterQueue<EventMessage> {
+                val dlq = mockk<SequencedDeadLetterQueue<EventMessage>>(relaxed = true)
+                every { dlq.deadLetters(any()) } answers {
+                    perTenant.getValue(tenantOf(firstArg())).deadLetters(firstArg())
+                }
+                every { dlq.amountOfSequences(any()) } answers {
+                    perTenant.getValue(tenantOf(firstArg())).amountOfSequences(firstArg())
+                }
+                return dlq
+            }
+
+            private fun DeadLetterResponse.messageIds() = sequences.map { it.single().messageIdentifier }
+
+            @Test
+            fun `serves a page inside one tenant from that tenant only`() {
+                val response = manager.deadLetters("notifier", offset = 3, size = 2)
+
+                assertEquals(listOf("b2", "b3"), response.messageIds())
+                assertEquals(6, response.totalCount)
+                verify(exactly = 0) { tenantA.deadLetters(any()) }
+                verify(exactly = 1) { tenantB.deadLetters(any()) }
+                verify(exactly = 0) { tenantC.deadLetters(any()) }
+            }
+
+            @Test
+            fun `serves a page spanning two tenants in tenant id order`() {
+                val response = manager.deadLetters("notifier", offset = 1, size = 3)
+
+                assertEquals(listOf("a2", "b1", "b2"), response.messageIds())
+                assertEquals(listOf("tenant-a", "tenant-b", "tenant-b"), response.sequences.map { it.single().tenant })
+                assertEquals(6, response.totalCount)
+                verify(exactly = 0) { tenantC.deadLetters(any()) }
+            }
+
+            @Test
+            fun `returns an empty page beyond the end without loading any tenant`() {
+                val response = manager.deadLetters("notifier", offset = 6, size = 5)
+
+                assertTrue(response.sequences.isEmpty())
+                assertEquals(6, response.totalCount)
+                perTenant.values.forEach { verify(exactly = 0) { it.deadLetters(any()) } }
+            }
+
+            @Test
+            fun `cuts the page by the counts it reports when a tenant grew after counting`() {
+                every { tenantA.amountOfSequences(any()) } returns CompletableFuture.completedFuture(1L)
+
+                val response = manager.deadLetters("notifier", offset = 0, size = 3)
+
+                assertEquals(listOf("a1", "b1", "b2"), response.messageIds())
+                assertEquals(5, response.totalCount)
+            }
+
+            @Nested
+            inner class CachedCounts {
+
+                @Test
+                fun `pages from the counts the processor report cached`() {
+                    manager.infoFor("notifier")
+
+                    val response = manager.deadLetters("notifier", offset = 2, size = 2)
+
+                    assertEquals(listOf("b1", "b2"), response.messageIds())
+                    assertEquals(6, response.totalCount)
+                    perTenant.values.forEach { verify(exactly = 1) { it.amountOfSequences(any()) } }
+                }
+
+                @Test
+                fun `counts again when a tenant on the page no longer matches its cached count`() {
+                    manager.deadLetters("notifier", offset = 0, size = 2)
+                    every { tenantB.deadLetters(any()) } returns CompletableFuture.completedFuture(listOf(
+                            listOf(fakeLetter("b1", payload = "acc-b1")),
+                            listOf(fakeLetter("b3", payload = "acc-b3")),
+                    ))
+                    every { tenantB.amountOfSequences(any()) } returns CompletableFuture.completedFuture(2L)
+
+                    val response = manager.deadLetters("notifier", offset = 2, size = 3)
+
+                    assertEquals(listOf("b1", "b3", "c1"), response.messageIds())
+                    assertEquals(5, response.totalCount)
+                    perTenant.values.forEach { verify(exactly = 2) { it.amountOfSequences(any()) } }
+                }
+
+                @Test
+                fun `counts again when a tenant was added`() {
+                    manager.deadLetters("notifier", offset = 0, size = 2)
+                    perTenant["tenant-d"] = tenantDlq(prefix = "d", sequences = 1)
+                    tenants += "tenant-d"
+
+                    val response = manager.deadLetters("notifier", offset = 6, size = 5)
+
+                    assertEquals(listOf("d1"), response.messageIds())
+                    assertEquals(7, response.totalCount)
+                }
+
+                @Test
+                fun `shows a change outside the page once the TTL has passed`() {
+                    manager.deadLetters("notifier", offset = 0, size = 2)
+                    every { tenantC.amountOfSequences(any()) } returns CompletableFuture.completedFuture(2L)
+
+                    assertEquals(6, manager.deadLetters("notifier", offset = 0, size = 2).totalCount)
+
+                    clock.now = clock.now.plusSeconds(30)
+                    assertEquals(7, manager.deadLetters("notifier", offset = 0, size = 2).totalCount)
+                }
+            }
+        }
+    }
+
+    @Nested
+    inner class SingleTenantSize {
+
+        @Test
+        fun `counts the queue on every report`() {
+            val dlq = fakeDlq(sequences = listOf(listOf(fakeLetter("m1"))))
+            val manager = managerWith("DeadLetterQueue[EventHandlingComponent[notifier][Notifier]]" to dlq)
+
+            manager.infoFor("notifier")
+            manager.infoFor("notifier")
+
+            verify(exactly = 2) { dlq.amountOfSequences(null) }
         }
     }
 
@@ -855,14 +1405,30 @@ class DeadLetterManagerTest {
             ehc: EventHandlingComponent? = null,
             dlqMode: AxoniqConsoleDlqMode = AxoniqConsoleDlqMode.FULL,
             whitelist: List<String> = emptyList(),
+            tenancy: PlatformTenancy? = null,
+            unitOfWorkFactory: UnitOfWorkFactory = SimpleUnitOfWorkFactory(EmptyApplicationContext.INSTANCE),
+            clock: Clock = Clock.systemUTC(),
     ): DeadLetterManager {
-        val configuration = configurationWith(dlqsByName.asList(), ehc)
-        return DeadLetterManager(configuration, dlqMode, whitelist).also { it.start() }
+        val configuration = configurationWith(dlqsByName.asList(), ehc, unitOfWorkFactory)
+        return DeadLetterManager(
+                configuration = configuration,
+                dlqMode = dlqMode,
+                dlqDiagnosticsWhitelist = whitelist,
+                clock = clock,
+                tenantSizeTtl = Duration.ofSeconds(30),
+        ) { tenancy }.also { it.start() }
+    }
+
+    private class MutableClock(var now: Instant = Instant.EPOCH) : Clock() {
+        override fun instant(): Instant = now
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+        override fun withZone(zone: ZoneId): Clock = this
     }
 
     private fun configurationWith(
             dlqsByName: List<Pair<String, SequencedDeadLetterQueue<EventMessage>>>,
             ehc: EventHandlingComponent?,
+            unitOfWorkFactory: UnitOfWorkFactory,
     ): Configuration {
         val module = mockk<Configuration>(relaxed = true)
         every { module.getComponents(SequencedDeadLetterQueue::class.java) } returns
@@ -886,6 +1452,7 @@ class DeadLetterManagerTest {
         }
         val root = mockk<Configuration>(relaxed = true)
         every { root.moduleConfigurations } returns listOf(module)
+        every { root.getComponent(UnitOfWorkFactory::class.java) } returns unitOfWorkFactory
         return root
     }
 

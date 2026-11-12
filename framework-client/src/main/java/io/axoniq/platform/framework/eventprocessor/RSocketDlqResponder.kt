@@ -91,6 +91,7 @@ open class RSocketDlqResponder(
                 request.offset,
                 request.size,
                 request.maxSequenceLetters,
+                request.tenant,
         )
     }
 
@@ -99,7 +100,7 @@ open class RSocketDlqResponder(
                 "Handling Axoniq Platform DEAD_LETTER_SEQUENCE_SIZE query for processing group [{}]",
                 request.processingGroup,
         )
-        return deadLetterManager.sequenceSize(request.processingGroup, request.sequenceIdentifier)
+        return deadLetterManager.sequenceSize(request.processingGroup, request.sequenceIdentifier, request.tenant)
     }
 
     private fun handleSequenceLettersQuery(request: FetchSequenceLettersRequest): SequenceLettersResponse {
@@ -115,6 +116,7 @@ open class RSocketDlqResponder(
                 request.sequenceIdentifier,
                 request.offset,
                 request.size,
+                request.tenant,
         )
     }
 
@@ -123,7 +125,7 @@ open class RSocketDlqResponder(
                 "Handling Axoniq Platform DELETE_SEQUENCE command for processing group [{}], sequence [{}]",
                 request.processingGroup, request.sequenceIdentifier,
         )
-        val evicted = deadLetterManager.delete(request.processingGroup, request.sequenceIdentifier)
+        val evicted = deadLetterManager.delete(request.processingGroup, request.sequenceIdentifier, request.tenant)
         logger.info(
                 "DELETE_SEQUENCE for [{}] sequence [{}] → evicted {} letter(s)",
                 request.processingGroup, request.sequenceIdentifier, evicted,
@@ -139,6 +141,7 @@ open class RSocketDlqResponder(
                 request.processingGroup,
                 request.sequenceIdentifier,
                 request.messageIdentifier,
+                request.tenant,
         )
         logger.info(
                 "DELETE_LETTER for [{}] sequence [{}] message [{}] → {}",
@@ -152,7 +155,7 @@ open class RSocketDlqResponder(
                 "Handling Axoniq Platform PROCESS command for processing group [{}]",
                 request.processingGroup,
         )
-        return deadLetterManager.process(request.processingGroup, request.messageIdentifier)
+        return deadLetterManager.process(request.processingGroup, request.messageIdentifier, request.tenant)
     }
 
     private fun handleProcessAllSequencesCommand(request: ProcessAllDeadLetterSequencesRequest): Int {
@@ -160,7 +163,7 @@ open class RSocketDlqResponder(
                 "Handling Axoniq Platform PROCESS_ALL_SEQUENCES command for processing group [{}]",
                 request.processingGroup,
         )
-        return deadLetterManager.processAll(request.processingGroup, request.maxMessages)
+        return deadLetterManager.processAll(request.processingGroup, request.maxMessages, tenant = request.tenant)
     }
 
     private fun handleDeleteAllSequencesCommand(request: DeleteAllDeadLetterSequencesRequest): Int {
@@ -168,7 +171,7 @@ open class RSocketDlqResponder(
                 "Handling Axoniq Platform DELETE_ALL_SEQUENCES command for processing group [{}]",
                 request.processingGroup,
         )
-        return deadLetterManager.deleteAll(request.processingGroup)
+        return deadLetterManager.deleteAll(request.processingGroup, tenant = request.tenant)
     }
 
     private fun handleLettersForAutomaticRetryQuery(
@@ -183,6 +186,6 @@ open class RSocketDlqResponder(
                 "Handling Axoniq Platform AUTOMATED_RETRY command for processing group [{}], message [{}]",
                 request.processingGroup, request.messageIdentifier,
         )
-        return deadLetterManager.automatedRetry(request.processingGroup, request.messageIdentifier)
+        return deadLetterManager.automatedRetry(request.processingGroup, request.messageIdentifier, request.tenant)
     }
 }

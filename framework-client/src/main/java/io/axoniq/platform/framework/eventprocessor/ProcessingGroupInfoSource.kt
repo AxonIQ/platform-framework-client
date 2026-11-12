@@ -22,5 +22,6 @@ interface ProcessingGroupInfoSource {
     data class ProcessingGroupInfo(
             val processingGroup: String,
             val dlqSize: Long?,
+            val dlqSizePerTenant: Map<String, Long>? = null,
     )
 }
