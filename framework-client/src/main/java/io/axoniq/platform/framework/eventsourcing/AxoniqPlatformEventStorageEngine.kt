@@ -15,6 +15,7 @@ import io.axoniq.platform.framework.messaging.HandlerMetricsRegistry
 import io.axoniq.platform.framework.messaging.toInformation
 import io.axoniq.platform.framework.modelling.CurrentEntityContext
 import io.axoniq.platform.framework.modelling.EntityMetricsRegistry
+import io.axoniq.platform.framework.workflow.WorkflowStatisticsCollector
 import org.axonframework.common.infra.ComponentDescriptor
 import org.axonframework.eventsourcing.eventstore.AppendCondition
 import org.axonframework.eventsourcing.eventstore.EventStorageEngine
@@ -33,6 +34,7 @@ class AxoniqPlatformEventStorageEngine(
         private val delegate: EventStorageEngine,
         private val registry: HandlerMetricsRegistry,
         private val entityMetricsRegistry: EntityMetricsRegistry,
+        private val workflowStatistics: WorkflowStatisticsCollector? = null,
 ) : EventStorageEngine {
 
     override fun appendEvents(condition: AppendCondition, context: ProcessingContext?, events: List<TaggedEventMessage<*>>): CompletableFuture<EventStorageEngine.AppendTransaction<*>> {
@@ -51,6 +53,12 @@ class AxoniqPlatformEventStorageEngine(
         }
         if (context == null) {
             return delegate.appendEvents(condition, context, events)
+        }
+        workflowStatistics?.let { collector ->
+            val workflowEvents = events.map { it.event() }.filter { it.metadata().containsKey(WORKFLOW_ID) }
+            if (workflowEvents.isNotEmpty()) {
+                context.runOnAfterCommit { collector.onAppended(workflowEvents) }
+            }
         }
         // Second, measure commit time if measurement is ongoing
         val startTime = System.nanoTime()
@@ -94,3 +102,5 @@ class AxoniqPlatformEventStorageEngine(
         descriptor.describeWrapperOf(delegate)
     }
 }
+
+private const val WORKFLOW_ID = "workflowId"
