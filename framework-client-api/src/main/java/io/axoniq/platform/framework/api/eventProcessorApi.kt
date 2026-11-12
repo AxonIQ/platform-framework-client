@@ -36,6 +36,8 @@ data class ProcessorStatus(
 data class ProcessingGroupStatus(
         val name: String,
         val dlqSize: Long?,
+        /** Sequences per tenant of a multi-tenant application, null otherwise. [dlqSize] is their sum. */
+        val dlqSizePerTenant: Map<String, Long>? = null,
 )
 
 data class SegmentStatus(
@@ -52,6 +54,11 @@ data class SegmentStatus(
         val processingLatency: Double?,
         val position: Long? = -1,
         val resetPosition: Long? = -1,
+        /**
+         * Position per tenant of a multi-tenant application, null otherwise. The framework keeps one token per segment
+         * holding every tenant's position, so [position] is their sum and means nothing on its own.
+         */
+        val tenantPositions: Map<String, Long>? = null,
 )
 
 data class ProcessorSegmentId(

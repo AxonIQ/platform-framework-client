@@ -25,6 +25,16 @@
         <testSourceDirectory>${project.basedir}/src/test/kotlin</testSourceDirectory>
         <plugins>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- Multi-tenancy switches itself on from the classpath and then needs Axon Server; tests opt in explicitly. -->
+                    <classpathDependencyExcludes>
+                        <classpathDependencyExclude>io.axoniq.framework:axoniq-multi-tenancy</classpathDependencyExclude>
+                    </classpathDependencyExcludes>
+                </configuration>
+            </plugin>
+            <plugin>
                 <groupId>org.jetbrains.kotlin</groupId>
                 <artifactId>kotlin-maven-plugin</artifactId>
                 <executions>
@@ -80,6 +90,19 @@
             <artifactId>axoniq-dead-letter</artifactId>
             <scope>provided</scope>
             <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>io.axoniq.framework</groupId>
+            <artifactId>axoniq-multi-tenancy</artifactId>
+            <scope>provided</scope>
+            <optional>true</optional>
+            <exclusions>
+                <!-- Only the tenant API is used; the connector would make every test application connect to Axon Server. -->
+                <exclusion>
+                    <groupId>io.axoniq.framework</groupId>
+                    <artifactId>axon-server-connector</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <dependency>
