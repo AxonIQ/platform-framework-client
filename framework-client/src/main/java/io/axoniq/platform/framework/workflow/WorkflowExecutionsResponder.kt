@@ -53,6 +53,8 @@ internal class WorkflowExecutionsResponder(
             val matching = instances
                     .filter { query.status == null || it.status == query.status }
                     .filter { search.isEmpty() || search in it.workflowId.lowercase() || search in it.definitionName.lowercase() }
+                    .filter { query.definitionName == null || it.definitionName == query.definitionName }
+                    .filter { query.definitionVersion == null || it.definitionVersion == query.definitionVersion }
                     .sortedWith(compareByDescending<WorkflowInstance, Long?>(nullsFirst()) { it.startedAt }.thenBy { it.workflowId })
             WorkflowExecutionsResult(
                     items = matching.drop(query.offset).take(query.limit).map { it.summary() },

@@ -93,14 +93,17 @@ enum class WorkflowGraphEdgeKind {
 }
 
 /**
- * Asks for a page of workflow executions, newest first, finished ones included. [search] matches the workflow id or the
- * definition name, ignoring case; [status] is the instance's status (`STARTED` while it runs).
+ * Asks for a page of workflow executions, newest first, finished ones included. [definitionName] and
+ * [definitionVersion] limit it to one definition, matched exactly; [search] matches the workflow id or the definition
+ * name, ignoring case; [status] is the instance's status (`STARTED` while it runs).
  */
 data class WorkflowExecutionsQuery(
         val search: String = "",
         val status: String? = null,
         val offset: Int = 0,
         val limit: Int = 50,
+        val definitionName: String? = null,
+        val definitionVersion: String? = null,
 )
 
 data class WorkflowExecutionsResult(

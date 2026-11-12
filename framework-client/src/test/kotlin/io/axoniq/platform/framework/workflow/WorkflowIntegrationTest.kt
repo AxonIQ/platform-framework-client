@@ -151,6 +151,17 @@ class WorkflowIntegrationTest {
         }
 
         @Test
+        fun `executions are limited to one definition, matched exactly, and searched within it`() {
+            val lambda = executions.executions(WorkflowExecutionsQuery(status = "COMPLETED")).items.single()
+            fun ids(query: WorkflowExecutionsQuery) = executions.executions(query).items.map { it.workflowId }
+
+            assertEquals(listOf(lambda.workflowId), ids(WorkflowExecutionsQuery(definitionName = "lambda", definitionVersion = lambda.definitionVersion)))
+            assertEquals(emptyList<String>(), ids(WorkflowExecutionsQuery(definitionName = "lamb")))
+            assertEquals(emptyList<String>(), ids(WorkflowExecutionsQuery(definitionName = "lambda", definitionVersion = "${lambda.definitionVersion}-other")))
+            assertEquals(emptyList<String>(), ids(WorkflowExecutionsQuery(definitionName = "lambda", search = "order-1")))
+        }
+
+        @Test
         fun `the journal holds the start, every step event and the end, in order`() {
             val lambda = executions.executions(WorkflowExecutionsQuery(status = "COMPLETED")).items.single()
 
