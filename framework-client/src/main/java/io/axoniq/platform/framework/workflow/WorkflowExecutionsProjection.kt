@@ -52,7 +52,8 @@ import java.util.zip.GZIPOutputStream
  *
  * A [refresh] reads the events appended since the previous one. The first one starts from the snapshot the nodes of
  * the application store in the [SnapshotStore] every few minutes, so the full history is read once, not at every
- * boot; without a snapshot store it starts from the beginning. Events this node appends are applied right away as
+ * boot; without a snapshot store it starts from the beginning. A node skips storing when another node stored a
+ * snapshot of the same definitions within that interval, so mostly one node stores it. Events this node appends are applied right away as
  * well, so its own instances are known before the next refresh. A request waits at most [refreshWait] for a refresh
  * and otherwise answers from what is known, so a long first read does not make it time out.
  *
@@ -184,13 +185,25 @@ internal class WorkflowExecutionsProjection(
 
     private fun storeSnapshot() {
         val store = configuration.getOptionalComponent(SnapshotStore::class.java).orElse(null) ?: return
+        lastSnapshotAt = Instant.now()
+        if (storedRecently(store)) return
         val bytes = ByteArrayOutputStream().also { out ->
             GZIPOutputStream(out).use { mapper.writeValue(it, SnapshotPayload(definitions, instances.values.map { instance -> instance.toSnapshot() })) }
         }.toByteArray()
-        store.store(SNAPSHOT_NAME, snapshotName, Snapshot(events.position, SNAPSHOT_VERSION, bytes, Instant.now(), emptyMap()), null)
+        val metadata = mapOf(SNAPSHOT_DEFINITIONS to definitions.sorted().joinToString("\n"))
+        store.store(SNAPSHOT_NAME, snapshotName, Snapshot(events.position, SNAPSHOT_VERSION, bytes, Instant.now(), metadata), null)
                 .whenComplete { _, e -> if (e != null) logger.debug(e) { "Could not store the workflow executions snapshot" } }
-        lastSnapshotAt = Instant.now()
         changedSinceSnapshot = false
+    }
+
+    private fun storedRecently(store: SnapshotStore): Boolean = try {
+        store.load(SNAPSHOT_NAME, snapshotName, null).get(SNAPSHOT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                ?.takeIf { it.version == SNAPSHOT_VERSION }
+                ?.takeIf { it.metadata()[SNAPSHOT_DEFINITIONS]?.split("\n")?.toSet()?.containsAll(definitions) == true }
+                ?.let { Instant.now().isBefore(it.timestamp().plus(SNAPSHOT_INTERVAL)) } == true
+    } catch (e: Exception) {
+        logger.debug(e) { "Could not read the stored workflow executions snapshot; storing this node's" }
+        false
     }
 
     private data class SnapshotPayload(val definitions: Set<String>, val instances: List<SnapshotInstance>)
@@ -224,8 +237,9 @@ internal class WorkflowExecutionsProjection(
     internal companion object {
         val SNAPSHOT_NAME = QualifiedName("io.axoniq.platform.WorkflowExecutions")
         const val SNAPSHOT_VERSION = "1"
+        const val SNAPSHOT_DEFINITIONS = "definitions"
         private const val SNAPSHOT_TIMEOUT_SECONDS = 30L
-        private val SNAPSHOT_INTERVAL: Duration = Duration.ofMinutes(5)
+        val SNAPSHOT_INTERVAL: Duration = Duration.ofMinutes(5)
         private val mapper: CBORMapper = CBORMapper.builder().addModule(KotlinModule.Builder().build()).build()
     }
 }

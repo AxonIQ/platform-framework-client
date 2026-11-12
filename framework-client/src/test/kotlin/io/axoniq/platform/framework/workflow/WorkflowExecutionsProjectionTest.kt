@@ -121,6 +121,54 @@ class WorkflowExecutionsProjectionTest {
     }
 
     @Nested
+    inner class SnapshotStoring {
+
+        private fun stored(): Snapshot? = configuration.getComponent(SnapshotStore::class.java)
+                .load(WorkflowExecutionsProjection.SNAPSHOT_NAME, "test-app", null).get()
+
+        private fun storeOtherNodesSnapshot(storedAt: Instant, definitions: String) = configuration.getComponent(SnapshotStore::class.java)
+                .store(WorkflowExecutionsProjection.SNAPSHOT_NAME, "test-app",
+                        Snapshot(GlobalIndexPosition(1_000_000), WorkflowExecutionsProjection.SNAPSHOT_VERSION, "other node".toByteArray(),
+                                storedAt, mapOf(WorkflowExecutionsProjection.SNAPSHOT_DEFINITIONS to definitions)), null)
+                .get()
+
+        private fun publishOrder(orderId: String) = configuration.getComponent(EventSink::class.java)
+                .publish(null, GenericEventMessage(MessageType("OrderPlaced"), mapOf("orderId" to orderId)))
+                .get()
+
+        @Test
+        fun `a node leaves the snapshot another node stored within the interval`() {
+            await().atMost(Duration.ofSeconds(10)).until { stored() != null }
+            val before = stored()!!
+            publishOrder("order-2")
+
+            projection().refresh()
+
+            assertEquals(before.timestamp(), stored()!!.timestamp())
+        }
+
+        @Test
+        fun `a node replaces a snapshot older than the interval`() {
+            val storedAt = Instant.now().minus(WorkflowExecutionsProjection.SNAPSHOT_INTERVAL).minusSeconds(60)
+            storeOtherNodesSnapshot(storedAt, definitions = "annotatedOrder\nlambda")
+
+            projection().refresh()
+
+            await().atMost(Duration.ofSeconds(10)).until { stored()!!.timestamp().isAfter(storedAt) }
+        }
+
+        @Test
+        fun `a node replaces a recent snapshot that leaves out one of its definitions`() {
+            val storedAt = Instant.now().minusSeconds(1)
+            storeOtherNodesSnapshot(storedAt, definitions = "lambda")
+
+            projection().refresh()
+
+            await().atMost(Duration.ofSeconds(10)).until { stored()!!.timestamp().isAfter(storedAt) }
+        }
+    }
+
+    @Nested
     inner class Definitions {
 
         @Test
