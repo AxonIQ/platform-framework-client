@@ -22,7 +22,7 @@ import io.axoniq.platform.framework.api.WorkflowExecutionsQuery
 import io.axoniq.platform.framework.api.WorkflowExecutionsResult
 import io.axoniq.platform.framework.client.RSocketHandlerRegistrar
 import org.axonframework.common.configuration.Configuration
-import org.axonframework.eventsourcing.eventstore.EventStore
+import org.axonframework.eventsourcing.eventstore.GlobalIndexPosition
 import org.axonframework.messaging.eventhandling.EventMessage
 import org.axonframework.messaging.eventhandling.conversion.EventConverter
 
@@ -33,7 +33,8 @@ import org.axonframework.messaging.eventhandling.conversion.EventConverter
  *
  * The list comes from the [WorkflowExecutionsProjection], which each request brings up to date if that takes no longer
  * than a few seconds. One execution and its journal are read from that execution's own events, which the engine tags
- * with its workflow id, so they show its payloads and stay cheap to poll.
+ * with its workflow id, so they show its payloads and stay cheap to poll. The journals of the executions asked for most
+ * recently are kept, and a request reads only the events appended since the previous one.
  */
 internal class WorkflowExecutionsResponder(
         private val registrar: RSocketHandlerRegistrar,
@@ -52,9 +53,9 @@ internal class WorkflowExecutionsResponder(
         return projection.read { instances ->
             val matching = instances
                     .filter { query.status == null || it.status == query.status }
-                    .filter { search.isEmpty() || search in it.workflowId.lowercase() || search in it.definitionName.lowercase() }
                     .filter { query.definitionName == null || it.definitionName == query.definitionName }
                     .filter { query.definitionVersion == null || it.definitionVersion == query.definitionVersion }
+                    .filter { search.isEmpty() || search in it.workflowId.lowercase() || search in it.definitionName.lowercase() }
                     .sortedWith(compareByDescending<WorkflowInstance, Long?>(nullsFirst()) { it.startedAt }.thenBy { it.workflowId })
             WorkflowExecutionsResult(
                     items = matching.drop(query.offset).take(query.limit).map { it.summary() },
@@ -99,12 +100,29 @@ internal class WorkflowExecutionsResponder(
 
     private class WorkflowEvent(val message: EventMessage, val position: Long, val entry: JournalEntry)
 
+    private val journals = object : LinkedHashMap<String, Journal>(MAX_CACHED_JOURNALS, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Journal>) = size > MAX_CACHED_JOURNALS
+    }
+
     /** The journal of one instance: its start, step and end events in the order they were appended. */
-    private fun eventsOf(workflowId: String): List<WorkflowEvent> {
-        val eventStore = configuration.getOptionalComponent(EventStore::class.java).orElse(null) ?: return emptyList()
-        return sourceEvents(configuration, eventStore, EventSourcedWorkflowState.criteriaBuilder(workflowId))
-                .mapNotNull { event -> journalEntryOf(event)?.let { event to it } }
-                .mapIndexed { position, (event, entry) -> WorkflowEvent(event, position.toLong(), entry) }
+    private fun eventsOf(workflowId: String): List<WorkflowEvent> =
+            synchronized(journals) { journals.getOrPut(workflowId) { Journal(workflowId) } }.read()
+
+    private inner class Journal(workflowId: String) {
+        private val source = IncrementalSource(configuration, EventSourcedWorkflowState.criteriaBuilder(workflowId))
+        private var events: List<WorkflowEvent> = emptyList()
+
+        /** An engine without a global index gives no position to continue from, so then every read starts over. */
+        @Synchronized
+        fun read(): List<WorkflowEvent> {
+            val appended = mutableListOf<EventMessage>()
+            source.read { appended += it }
+            val known = if (source.position is GlobalIndexPosition) events else emptyList()
+            events = known + appended
+                    .mapNotNull { event -> journalEntryOf(event)?.let { event to it } }
+                    .mapIndexed { index, (event, entry) -> WorkflowEvent(event, (known.size + index).toLong(), entry) }
+            return events
+        }
     }
 
     private fun mayShowPayload(): Boolean {
@@ -122,5 +140,6 @@ internal class WorkflowExecutionsResponder(
     private companion object {
         const val MAX_PAGE = 100
         const val MAX_PAYLOAD_BYTES = 16_384
+        const val MAX_CACHED_JOURNALS = 16
     }
 }

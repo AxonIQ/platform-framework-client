@@ -217,6 +217,21 @@ class WorkflowIntegrationTest {
             }
 
             @Test
+            fun `a journal read before shows the events appended since, numbered on`() {
+                val before = executions.events(WorkflowExecutionEventsQuery(workflowId = "order-1")).events
+
+                publish(Map::class.java.name, orderId = "order-1")
+                await().atMost(Duration.ofSeconds(10)).until {
+                    executions.execution(WorkflowExecutionQuery(workflowId = "order-1")).execution!!.status == "COMPLETED"
+                }
+
+                val after = executions.events(WorkflowExecutionEventsQuery(workflowId = "order-1")).events
+                assertEquals(before, after.take(before.size))
+                assertEquals((0L until after.size).toList(), after.map { it.position })
+                assertEquals(null to "COMPLETED", after.last().stepName to after.last().status)
+            }
+
+            @Test
             fun `an execution that ends is listed as ended`() {
                 publish(Map::class.java.name, orderId = "order-1")
 
