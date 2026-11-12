@@ -191,7 +191,7 @@ internal class WorkflowDefinitionAnalyzer(
                 sources.forEach { from -> builder.edge(from.target, link.target, from.kind.or(link.kind)) }
             }
         }
-        val exits = marks.values.filterIsInstance<ReturnMark>().flatMap { flow.exitsBefore(it.index) }.distinctBy { it.target }
+        val exits = marks.values.filterIsInstance<ReturnMark>().flatMap { flow.exitsBefore(it.index) }.distinctBy { it.target to it.kind }
         return Fragment(flow.next(-1, false), exits, flow.reachesReturn(-1), returned)
     }
 
@@ -587,9 +587,13 @@ internal class GraphBuilder {
         return id
     }
 
+    /** A step that reaches the same node both normally and through its catch block keeps both edges. */
     fun edge(from: String, to: String, kind: WorkflowGraphEdgeKind = WorkflowGraphEdgeKind.NORMAL) {
         if (from == to && kind != WorkflowGraphEdgeKind.LOOP) return
-        if (edges.none { it.from == from && it.to == to }) edges += WorkflowGraphEdge(from, to, kind)
+        val error = kind == WorkflowGraphEdgeKind.ERROR
+        if (edges.none { it.from == from && it.to == to && (it.kind == WorkflowGraphEdgeKind.ERROR) == error }) {
+            edges += WorkflowGraphEdge(from, to, kind)
+        }
     }
 
     /** Records that [join] waits for [step], when [step] was started without waiting for it. */

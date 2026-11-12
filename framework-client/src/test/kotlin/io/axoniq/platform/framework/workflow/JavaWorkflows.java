@@ -115,6 +115,23 @@ public class JavaWorkflows {
         return true;
     }
 
+    public void chargeUpdatedCard(SimpleWorkflowContext ctx) {
+        if (!chargeWithUpdatedCard(ctx)) {
+            ctx.awaitExecute("downgrade", Boolean.class, () -> true);
+            return;
+        }
+        ctx.awaitExecute("activate", Boolean.class, () -> true);
+    }
+
+    private boolean chargeWithUpdatedCard(SimpleWorkflowContext ctx) {
+        try {
+            ctx.awaitExecute("chargeUpdatedCard", Boolean.class, () -> true);
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     public void retryThroughCatch(SimpleWorkflowContext ctx) {
         while (true) {
             try {

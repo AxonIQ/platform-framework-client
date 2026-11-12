@@ -195,6 +195,19 @@ class WorkflowDefinitionAnalyzerTest {
         }
 
         @Test
+        fun `a step that leaves a helper both normally and through a catch keeps its error edge`() {
+            val graph = analyzer.analyze(javaMethod("chargeUpdatedCard")).graph
+            val charge = graph.step("chargeUpdatedCard")
+
+            val kinds = graph.edges.filter { it.from == charge.id }.map { it.kind }.toSet()
+            assertEquals(setOf(WorkflowGraphEdgeKind.NORMAL, WorkflowGraphEdgeKind.ERROR), kinds)
+            val error = graph.edges.single { it.from == charge.id && it.kind == WorkflowGraphEdgeKind.ERROR }
+            val afterError = graph.nodes.single { it.id == error.to }
+            val branches = if (afterError.kind == WorkflowGraphNodeKind.EXCLUSIVE_GATEWAY) graph.next(afterError) else listOf(afterError)
+            assertTrue(branches.any { it.name == "downgrade" }, branches.toString())
+        }
+
+        @Test
         fun `the same code always gives the same graph`() {
             val first = WorkflowDefinitionAnalyzer(javaClass.classLoader).analyze(javaMethod("threeWaysToPay")).graph
 
