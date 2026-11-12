@@ -17,6 +17,7 @@ import io.axoniq.platform.framework.api.SegmentOverview
 import io.axoniq.platform.framework.api.SegmentStatus
 import org.axonframework.common.ReflectionUtils.getFieldValue
 import org.axonframework.common.configuration.Configuration
+import org.axonframework.messaging.core.unitofwork.UnitOfWorkFactory
 import org.axonframework.messaging.eventhandling.processing.EventProcessor
 import org.axonframework.messaging.eventhandling.processing.streaming.StreamingEventProcessor
 import org.axonframework.messaging.eventhandling.processing.streaming.pooled.PooledStreamingEventProcessor
@@ -31,6 +32,9 @@ class ProcessorReportCreator(private val processingConfig: Configuration) {
     // Optional — only present when an addon (currently only axoniq-dead-letter) registers a source.
     private val processingGroupInfoSource: ProcessingGroupInfoSource? =
             processingConfig.getOptionalComponent(ProcessingGroupInfoSource::class.java).orElse(null)
+    private val unitOfWorkFactory: UnitOfWorkFactory by lazy {
+        processingConfig.getComponent(UnitOfWorkFactory::class.java)
+    }
     companion object {
         const val MULTI_TENANT_PROCESSOR_CLASS = "org.axonframework.extensions.multitenancy.components.eventhandeling.MultiTenantEventProcessor"
     }
@@ -116,7 +120,9 @@ class ProcessorReportCreator(private val processingConfig: Configuration) {
         val processor = processingConfig.getComponents(StreamingEventProcessor::class.java).values.first { it.name() == processorName }
         val tokenStore = processor.tokenStore()
                 ?: throw IllegalStateException("Processor [$processorName] does not have a token store.")
-        val segments = tokenStore.fetchSegments(processorName, null).join()
+        val segments = unitOfWorkFactory.create()
+                .executeWithResult { context -> tokenStore.fetchSegments(processorName, context) }
+                .join()
         return SegmentOverview(
             segments.map { SegmentDetails(it.segmentId, it.mergeableSegmentId(), it.mask) }
         )
