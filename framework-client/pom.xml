@@ -13,7 +13,7 @@
     <parent>
         <groupId>io.axoniq.platform</groupId>
         <artifactId>framework-client-parent</artifactId>
-        <version>5.4.3</version>
+        <version>5.4.4-SNAPSHOT</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
@@ -46,6 +46,23 @@
     </build>
 
     <dependencies>
+        <dependency>
+            <groupId>io.axoniq.framework</groupId>
+            <artifactId>axoniq-workflow-engine</artifactId>
+            <version>5.4.0</version>
+            <scope>provided</scope>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm-tree</artifactId>
+            <version>${asm.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm-analysis</artifactId>
+            <version>${asm.version}</version>
+        </dependency>
         <dependency>
             <groupId>io.axoniq.platform</groupId>
             <artifactId>axoniq-platform-framework-client-api</artifactId>
@@ -127,6 +144,12 @@
             <scope>compile</scope>
         </dependency>
 
+        <dependency>
+            <groupId>io.axoniq.framework</groupId>
+            <artifactId>axoniq-workflow-dsl</artifactId>
+            <version>${axoniq-framework.version}</version>
+            <scope>test</scope>
+        </dependency>
         <!--test dependencies-->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -169,5 +192,46 @@
             <version>2.0.2</version>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <version>2.0.2</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.axoniq.framework</groupId>
+            <artifactId>axoniq-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.axoniq.framework</groupId>
+            <artifactId>axoniq-testcontainer</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
+
+    <profiles>
+        <!-- The connector makes every test application connect to Axon Server, so only this test runs with it. -->
+        <profile>
+            <id>axon-server-tests</id>
+            <dependencies>
+                <dependency>
+                    <groupId>io.axoniq.framework</groupId>
+                    <artifactId>axon-server-connector</artifactId>
+                    <scope>test</scope>
+                </dependency>
+            </dependencies>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <test>AxonServerIncrementalSourceBoundaryTest</test>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

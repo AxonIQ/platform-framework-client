@@ -89,6 +89,9 @@ class AxoniqConsoleRSocketClient(
     /** Whether a connection has ever succeeded, which decides how loudly a refusal is reported. */
     private var hasEverConnected = false
 
+    @Volatile
+    private var connections = 0
+
     init {
         platformClientConnectionService.subscribeToSettings(heartbeatOrchestrator)
 
@@ -185,6 +188,7 @@ class AxoniqConsoleRSocketClient(
         return createRSocketMono()
                 .flatMap { socket ->
                     rsocket = socket
+                    connections++
                     retrieveSettings().map { settings ->
                         platformClientConnectionService.onConnected(settings)
                         if (!suppressConnectMessage) {
@@ -319,6 +323,12 @@ class AxoniqConsoleRSocketClient(
     }
 
     fun isConnected() = rsocket != null
+
+    /**
+     * Counts the connections made so far. New settings are announced like a new connection, so an observer that sends
+     * something once per connection compares this instead.
+     */
+    fun connectionNumber() = connections
 
     fun disposeCurrentConnection() {
         val currentRSocket = rsocket

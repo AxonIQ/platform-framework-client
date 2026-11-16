@@ -12,6 +12,7 @@ import io.axoniq.platform.framework.api.AxoniqConsoleDlqMode;
 import io.axoniq.platform.framework.api.DomainEventAccessMode;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -66,6 +67,11 @@ public class AxoniqPlatformSpringProperties {
      * The maximum number of concurrent management tasks. Defaults to {@code 5}. Management tasks are tasks executed at
      * the request of the user, such as processing DLQ messages.
      */
+    /**
+     * The workflow executions the client keeps in memory to list them.
+     */
+    private Workflow workflow = new Workflow();
+
     private int maxConcurrentManagementTasks = 5;
 
     public String getHost() {
@@ -146,5 +152,42 @@ public class AxoniqPlatformSpringProperties {
 
     public void setMaxConcurrentManagementTasks(int maxConcurrentManagementTasks) {
         this.maxConcurrentManagementTasks = maxConcurrentManagementTasks;
+    }
+
+    public Workflow getWorkflow() {
+        return workflow;
+    }
+
+    public void setWorkflow(Workflow workflow) {
+        this.workflow = workflow;
+    }
+
+    public static class Workflow {
+
+        /**
+         * How long finished workflow executions stay listed. Defaults to 30 days.
+         */
+        private Duration retention = Duration.ofDays(30);
+
+        /**
+         * The most finished workflow executions listed at once, the oldest going first. Defaults to 10,000.
+         */
+        private int maxFinishedExecutions = 10_000;
+
+        public Duration getRetention() {
+            return retention;
+        }
+
+        public void setRetention(Duration retention) {
+            this.retention = retention;
+        }
+
+        public int getMaxFinishedExecutions() {
+            return maxFinishedExecutions;
+        }
+
+        public void setMaxFinishedExecutions(int maxFinishedExecutions) {
+            this.maxFinishedExecutions = maxFinishedExecutions;
+        }
     }
 }
