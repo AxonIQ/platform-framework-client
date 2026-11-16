@@ -12,3 +12,4 @@ io.axoniq.platform.framework.modelling.AxoniqPlatformModellingConfigurationEnhan
 io.axoniq.platform.framework.eventsourcing.AxoniqPlatformEventsourcingConfigurerEnhancer
 io.axoniq.platform.framework.eventsourcing.AxoniqPlatformModelInspectionEnhancer
 io.axoniq.platform.framework.eventprocessor.AxoniqPlatformDeadLetterConfigurerEnhancer
+io.axoniq.platform.framework.workflow.AxoniqPlatformWorkflowEnhancer

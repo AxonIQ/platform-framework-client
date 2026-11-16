@@ -1,0 +1,21 @@
+/*
+ * Copyright (c) 2022-2026. Axoniq B.V.
+ *
+ * Licensed under the Axoniq Terms of Service (the "Terms"). You may not
+ * use this file except in compliance with the Terms, available at
+ * https://www.axoniq.io/legal/terms-of-service
+ */
+
+package io.axoniq.platform.framework.api.metrics
+
+import com.fasterxml.jackson.annotation.JsonProperty
+
+/** A workflow definition version, or one of its steps when [stepName] is set. Never an instance. */
+data class WorkflowStatisticIdentifier(
+    @JsonProperty("n")
+    val definitionName: String,
+    @JsonProperty("v")
+    val definitionVersion: String,
+    @JsonProperty("s")
+    val stepName: String? = null,
+)
