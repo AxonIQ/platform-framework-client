@@ -115,8 +115,8 @@ Axoniq Platform Framework Client is licensed under the
 ## How to Release
 
 1. Run `mvn versions:set -DnewVersion=1.x.x` to update the version in the pom files
-2. Commit and push the change
+2. Make a PR for the new version and merge it
 3. Wait for the release to be on Maven central and publish it
-4. Create a Release at the current commit
+4. Create a Release at the current commit in GitHub with `v{version}` as tag
 5. Run `mvn versions:set -DnewVersion=1.x.x-SNAPSHOT`
-6. Commit and push the new development version
+6. Make a PR for the new development version and merge it

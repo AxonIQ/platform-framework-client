@@ -49,6 +49,8 @@ class AxoniqPlatformAutoConfiguration {
                 .secure(properties.isSecure)
                 .initialDelay(properties.initialDelay)
                 .domainEventAccessMode(properties.domainEventAccessMode)
+                .workflowRetention(properties.workflow.retention)
+                .workflowMaxFinishedExecutions(properties.workflow.maxFinishedExecutions)
                 .dlqMode(properties.dlqMode)
                 .also { properties.dlqDiagnosticsWhitelist.forEach(it::addDlqDiagnosticsWhitelistKey) }
     }
