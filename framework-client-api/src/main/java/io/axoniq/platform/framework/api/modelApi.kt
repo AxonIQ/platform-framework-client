@@ -51,6 +51,8 @@ data class ModelDomainEventsQuery(
         val idType: String,
         val page: Int = 0,
         val pageSize: Int = 10,
+        /** Tenant of a multi-tenant application. Null loads from the only tenant whose store has events for the id. */
+        val tenant: String? = null,
 )
 
 data class ModelEntityStateAtSequenceQuery(
@@ -59,6 +61,8 @@ data class ModelEntityStateAtSequenceQuery(
         /** FQ Java type name of the id type the user selected. */
         val idType: String,
         val maxSequenceNumber: Long = 0,
+        /** Tenant of a multi-tenant application. Null loads from the only tenant whose store has events for the id. */
+        val tenant: String? = null,
 )
 
 data class ModelTimelineQuery(
@@ -68,6 +72,8 @@ data class ModelTimelineQuery(
         val idType: String,
         val offset: Int = 0,
         val limit: Int = 100,
+        /** Tenant of a multi-tenant application. Null loads from the only tenant whose store has events for the id. */
+        val tenant: String? = null,
 )
 
 data class ModelTimelineResult(

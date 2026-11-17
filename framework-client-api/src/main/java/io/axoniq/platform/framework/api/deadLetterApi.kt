@@ -19,7 +19,9 @@ data class DeadLetter(
     val enqueuedAt: Instant,
     val lastTouched: Instant,
     val diagnostics: Map<String, *>,
-    val sequenceIdentifier: String
+    val sequenceIdentifier: String,
+    /** The tenant holding this letter in a multi-tenant application, null otherwise. */
+    val tenant: String? = null,
 )
 
 data class DeadLetterResponse(
@@ -32,36 +34,48 @@ data class DeadLetterRequest(
     val offset: Int,
     val size: Int,
     val maxSequenceLetters: Int,
+    /** Null covers every tenant of a multi-tenant application. */
+    val tenant: String? = null,
 )
 
 data class DeadLetterSequenceSize(
     val processingGroup: String,
-    val sequenceIdentifier: String
+    val sequenceIdentifier: String,
+    val tenant: String? = null,
 )
 
 data class DeadLetterSequenceDeleteRequest(
     val processingGroup: String,
     val sequenceIdentifier: String,
+    /** Null lets the application find the tenant holding the sequence, and refuse when more than one does. */
+    val tenant: String? = null,
 )
 
 data class DeadLetterSingleDeleteRequest(
     val processingGroup: String,
     val sequenceIdentifier: String,
     val messageIdentifier: String,
+    val tenant: String? = null,
 )
 
 data class ProcessAllDeadLetterSequencesRequest(
     val processingGroup: String,
-    val maxMessages: Int = 10
+    val maxMessages: Int = 10,
+    /** Null processes every tenant. */
+    val tenant: String? = null,
 )
 
 data class DeleteAllDeadLetterSequencesRequest(
-        val processingGroup: String
+        val processingGroup: String,
+        /** Null clears every tenant. */
+        val tenant: String? = null,
 )
 
 data class DeadLetterProcessRequest(
     val processingGroup: String,
-    val messageIdentifier: String
+    val messageIdentifier: String,
+    /** Null lets the application find the tenant holding the letter. */
+    val tenant: String? = null,
 )
 
 /**
@@ -78,6 +92,7 @@ data class FetchSequenceLettersRequest(
     val sequenceIdentifier: String,
     val offset: Int,
     val size: Int,
+    val tenant: String? = null,
 )
 
 /**
@@ -110,6 +125,8 @@ data class DeadLettersForAutomaticRetryRequest(
     val backoffMinutes: Int,
     val maxRetries: Int,
     val limit: Int,
+    /** Null covers every tenant. */
+    val tenant: String? = null,
 )
 
 enum class AutomaticRetryBackoff {
@@ -134,6 +151,7 @@ data class AutomaticRetryCandidate(
     val messageIdentifier: String,
     val retries: Int,
     val lastTouched: Instant,
+    val tenant: String? = null,
 )
 
 /**
@@ -145,4 +163,5 @@ data class AutomaticRetryCandidate(
 data class AutomatedRetryRequest(
     val processingGroup: String,
     val messageIdentifier: String,
+    val tenant: String? = null,
 )
