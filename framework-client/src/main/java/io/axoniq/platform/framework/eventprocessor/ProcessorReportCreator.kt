@@ -18,6 +18,7 @@ import io.axoniq.platform.framework.api.SegmentStatus
 import io.axoniq.platform.framework.tenancy.PlatformTenancy
 import org.axonframework.common.ReflectionUtils.getFieldValue
 import org.axonframework.common.configuration.Configuration
+import org.axonframework.messaging.core.unitofwork.UnitOfWorkFactory
 import org.axonframework.messaging.eventhandling.processing.EventProcessor
 import org.axonframework.messaging.eventhandling.processing.streaming.StreamingEventProcessor
 import org.axonframework.messaging.eventhandling.processing.streaming.pooled.PooledStreamingEventProcessor
@@ -36,6 +37,9 @@ class ProcessorReportCreator @JvmOverloads constructor(
     private val processingGroupInfoSource: ProcessingGroupInfoSource? =
             processingConfig.getOptionalComponent(ProcessingGroupInfoSource::class.java).orElse(null)
     private val tenancy: PlatformTenancy? = tenancyOf(processingConfig)
+    private val unitOfWorkFactory: UnitOfWorkFactory by lazy {
+        processingConfig.getComponent(UnitOfWorkFactory::class.java)
+    }
 
     fun createReport() = ProcessorStatusReport(
         processingConfig.getComponents(EventProcessor::class.java)
@@ -108,7 +112,9 @@ class ProcessorReportCreator @JvmOverloads constructor(
         val processor = processingConfig.getComponents(StreamingEventProcessor::class.java).values.first { it.name() == processorName }
         val tokenStore = processor.tokenStore()
                 ?: throw IllegalStateException("Processor [$processorName] does not have a token store.")
-        val segments = tokenStore.fetchSegments(processorName, null).join()
+        val segments = unitOfWorkFactory.create()
+                .executeWithResult { context -> tokenStore.fetchSegments(processorName, context) }
+                .join()
         return SegmentOverview(
             segments.map { SegmentDetails(it.segmentId, it.mergeableSegmentId(), it.mask) }
         )
