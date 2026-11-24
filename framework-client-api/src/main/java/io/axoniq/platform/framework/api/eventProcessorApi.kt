@@ -31,6 +31,11 @@ data class ProcessorStatus(
         val segmentCapacity: Int,
         val activeSegments: Int,
         val segments: List<SegmentStatus>,
+        /**
+         * Milliseconds since the event stream of this processor last had no event waiting, on this node. Low means the
+         * processor is at the head of its stream; growing means it is behind. `null` when unknown.
+         */
+        val caughtUpAgoMillis: Long? = null,
 )
 
 data class ProcessingGroupStatus(

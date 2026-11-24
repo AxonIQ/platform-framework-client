@@ -25,6 +25,7 @@ import io.axoniq.platform.framework.eventprocessor.AxoniqPlatformEventHandlingCo
 import io.axoniq.platform.framework.eventprocessor.EventProcessorManager;
 import io.axoniq.platform.framework.eventprocessor.ProcessorMetricsRegistry;
 import io.axoniq.platform.framework.eventprocessor.ProcessorReportCreator;
+import io.axoniq.platform.framework.eventprocessor.ProcessorStreamSampler;
 import io.axoniq.platform.framework.eventprocessor.RSocketProcessorResponder;
 import io.axoniq.platform.framework.messaging.AxoniqPlatformCommandBus;
 import io.axoniq.platform.framework.messaging.AxoniqPlatformQueryBus;
@@ -67,6 +68,13 @@ public class AxoniqPlatformConfigurerEnhancer implements ConfigurationEnhancer {
                 .registerComponent(ComponentDefinition
                                            .ofType(ApplicationMetricRegistry.class)
                                            .withBuilder(c -> new ApplicationMetricRegistry()))
+                .registerComponent(ComponentDefinition
+                                           .ofType(ProcessorStreamSampler.class)
+                                           .withBuilder(c -> new ProcessorStreamSampler(
+                                                   c,
+                                                   c.getComponent(AxoniqPlatformConfiguration.class)))
+                                           .onStart(Phase.EXTERNAL_CONNECTIONS, ProcessorStreamSampler::start)
+                                           .onShutdown(Phase.EXTERNAL_CONNECTIONS, ProcessorStreamSampler::stop))
                 .registerComponent(ComponentDefinition
                                            .ofType(ProcessorReportCreator.class)
                                            .withBuilder(ProcessorReportCreator::new))

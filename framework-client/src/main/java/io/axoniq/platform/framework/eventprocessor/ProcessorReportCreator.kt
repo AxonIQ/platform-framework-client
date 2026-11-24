@@ -25,10 +25,13 @@ import org.axonframework.messaging.eventhandling.processing.streaming.segmenting
 import org.axonframework.messaging.eventhandling.processing.streaming.token.store.TokenStore
 import org.axonframework.messaging.eventhandling.processing.subscribing.SubscribingEventProcessor
 import org.slf4j.LoggerFactory
+import java.time.Duration
+import java.time.Instant
 
 class ProcessorReportCreator(private val processingConfig: Configuration) {
     private val logger = LoggerFactory.getLogger(ProcessorReportCreator::class.java)
     private val metricsRegistry = processingConfig.getComponent(ProcessorMetricsRegistry::class.java)
+    private val streamSampler = processingConfig.getComponent(ProcessorStreamSampler::class.java)
     // Optional — only present when an addon (currently only axoniq-dead-letter) registers a source.
     private val processingGroupInfoSource: ProcessingGroupInfoSource? =
             processingConfig.getOptionalComponent(ProcessingGroupInfoSource::class.java).orElse(null)
@@ -61,6 +64,7 @@ class ProcessorReportCreator(private val processingConfig: Configuration) {
             processor.maxCapacity(),
             processor.processingStatus().filterValues { !it.isErrorState }.size,
             processor.processingStatus().map { (_, segment) -> segment.toStatus(name) },
+            streamSampler.lastCaughtUpAt(processor.name())?.let { Duration.between(it, Instant.now()).toMillis() },
         )
 
     private fun processingGroupsFor(processorName: String): List<ProcessingGroupStatus> {

@@ -83,6 +83,7 @@ class ProcessorReportCreatorTest {
     private fun baseConfigurationWith(infoSource: Optional<ProcessingGroupInfoSource>): Configuration {
         val config = mockk<Configuration>(relaxed = true)
         every { config.getComponent(ProcessorMetricsRegistry::class.java) } returns ProcessorMetricsRegistry()
+        every { config.getComponent(ProcessorStreamSampler::class.java) } returns mockk()
         every { config.getOptionalComponent(ProcessingGroupInfoSource::class.java) } returns infoSource
         return config
     }
