@@ -10,12 +10,17 @@ package io.axoniq.platform.framework.eventsourcing
 
 import io.axoniq.platform.framework.AxoniqPlatformConfiguration
 import io.axoniq.platform.framework.api.DomainEventAccessMode
+import io.axoniq.platform.framework.api.ModelDomainEventsQuery
+import io.axoniq.platform.framework.api.ModelEntityStateAtSequenceQuery
 import io.axoniq.platform.framework.api.ModelTimelineEntry
+import io.axoniq.platform.framework.api.ModelTimelineQuery
 import io.axoniq.platform.framework.client.RSocketHandlerRegistrar
+import io.axoniq.platform.framework.tenancy.PlatformTenancy
 import io.mockk.every
 import io.mockk.mockk
 import org.axonframework.common.configuration.Configuration
 import org.axonframework.eventsourcing.eventstore.EventStorageEngine
+import org.axonframework.modelling.repository.Repository
 import java.util.Optional
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -24,6 +29,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.util.UUID
@@ -282,6 +288,73 @@ class RSocketModelInspectionResponderHelpersTest {
         }
     }
 
+    @Nested
+    inner class Tenants {
+
+        private val tenancy = mockk<PlatformTenancy> {
+            every { tenants() } returns listOf("tenant-a", "tenant-b")
+        }
+
+        private fun responderWith(tenancy: PlatformTenancy?) = RSocketModelInspectionResponder(
+                eventStorageEngine = mockk<EventStorageEngine>(),
+                registrar = mockk<RSocketHandlerRegistrar>(),
+                configuration = mockk<Configuration> {
+                    every { getOptionalComponent(AxoniqPlatformConfiguration::class.java) } returns Optional.of(
+                            mockk<AxoniqPlatformConfiguration> { every { domainEventAccessMode } returns DomainEventAccessMode.FULL }
+                    )
+                },
+                tenancyOf = { tenancy },
+        ).also {
+            it.registerRepository(mockk<Repository<String, SampleEntity>> {
+                every { entityType() } returns SampleEntity::class.java
+                every { idType() } returns String::class.java
+            })
+        }
+
+        @Test
+        fun `reports the tenants of a multi-tenant application with its entities`() {
+            assertEquals(listOf("tenant-a", "tenant-b"), responderWith(tenancy).handleRegisteredEntities().tenants)
+        }
+
+        @Test
+        fun `reports no tenants for a single-tenant application`() {
+            assertEquals(emptyList<String>(), responderWith(null).handleRegisteredEntities().tenants)
+        }
+
+        @Test
+        fun `rejects a timeline without a tenant in a multi-tenant application`() {
+            val query = ModelTimelineQuery(
+                    entityType = SampleEntity::class.java.name,
+                    entityId = "order-1",
+                    idType = String::class.java.name,
+            )
+
+            assertThrows<IllegalArgumentException> { responderWith(tenancy).handleTimelineReplay(query) }
+        }
+
+        @Test
+        fun `rejects domain events without a tenant in a multi-tenant application`() {
+            val query = ModelDomainEventsQuery(
+                    entityType = SampleEntity::class.java.name,
+                    entityId = "order-1",
+                    idType = String::class.java.name,
+            )
+
+            assertThrows<IllegalArgumentException> { responderWith(tenancy).handleDomainEvents(query) }
+        }
+
+        @Test
+        fun `rejects a state without a tenant in a multi-tenant application`() {
+            val query = ModelEntityStateAtSequenceQuery(
+                    entityType = SampleEntity::class.java.name,
+                    entityId = "order-1",
+                    idType = String::class.java.name,
+            )
+
+            assertThrows<IllegalArgumentException> { responderWith(tenancy).handleEntityStateAtSequence(query) }
+        }
+    }
+
     // ---------------------------------------------------------------------------------------
     //  Shared test fixtures
     // ---------------------------------------------------------------------------------------
@@ -297,6 +370,8 @@ class RSocketModelInspectionResponderHelpersTest {
             )
 
     enum class SampleEnumId { A, B }
+
+    class SampleEntity
 
     /** A typical AF5 compound entity id (record). Mirrors `ReservationId(showId, seatNumber)`. */
     @JvmRecord

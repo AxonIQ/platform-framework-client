@@ -30,10 +30,11 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.function.BiConsumer
 import kotlin.jvm.optionals.getOrNull
 
-open class RSocketModelInspectionResponder(
+open class RSocketModelInspectionResponder @JvmOverloads constructor(
         @Suppress("unused") private val eventStorageEngine: EventStorageEngine,
         private val registrar: RSocketHandlerRegistrar,
         private val configuration: Configuration,
+        private val tenancyOf: (Configuration) -> PlatformTenancy? = PlatformTenancy::of,
 ) {
     private val logger = LoggerFactory.getLogger(this::class.java)
 
@@ -53,7 +54,7 @@ open class RSocketModelInspectionResponder(
     }
 
     /** Null when the application is not multi-tenant; otherwise every load needs a tenant on its context. */
-    private val tenancy: PlatformTenancy? by lazy { PlatformTenancy.of(configuration) }
+    private val tenancy: PlatformTenancy? by lazy { tenancyOf(configuration) }
 
     /**
      * Privacy gate read once at first access, sourced directly from [AxoniqPlatformConfiguration]
@@ -146,7 +147,7 @@ open class RSocketModelInspectionResponder(
             )
         }
         logger.debug("Found entities: {}", entities)
-        return RegisteredEntitiesResult(entities = entities)
+        return RegisteredEntitiesResult(entities = entities, tenants = tenancy?.tenants() ?: emptyList())
     }
 
     /**
@@ -305,35 +306,12 @@ open class RSocketModelInspectionResponder(
     }
 
     /**
-     * The tenant to load [typedId] from: the one asked for, or the only tenant whose store has events for it. An
-     * entity id is only unique per tenant, so a match in more than one tenant is refused rather than guessed. When no
-     * tenant has events, any tenant gives the same empty result as an unknown id in a single-tenant application.
+     * An entity id is only unique per tenant, so a multi-tenant application needs the tenant named: finding it would
+     * mean sourcing the entity in every tenant.
      */
-    private fun tenantFor(repository: Repository<Any, Any>, typedId: Any, requested: String?): String? {
-        val tenancy = tenancy ?: return null
-        if (requested != null) return requested
-        val tenants = tenancy.tenants()
-        val holding = tenants.filter { hasEvents(repository, typedId, it) }
-        if (holding.size > 1) {
-            throw IllegalArgumentException("Entity [$typedId] exists in tenants $holding; name the tenant to inspect.")
-        }
-        return holding.singleOrNull() ?: tenants.firstOrNull()
-    }
-
-    private fun hasEvents(repository: Repository<Any, Any>, typedId: Any, tenant: String): Boolean {
-        var found = false
-        return try {
-            withInspectionUoW(
-                    repository = repository,
-                    typedId = typedId,
-                    beforeConsumer = { _, _ -> found = true },
-                    tenant = tenant,
-                    extract = { found },
-            )
-        } catch (e: Exception) {
-            logger.debug("Could not source [{}] from tenant [{}]", typedId, tenant, e)
-            false
-        }
+    private fun tenantFor(requested: String?): String? {
+        if (tenancy == null) return null
+        return requested ?: throw IllegalArgumentException("The application is multi-tenant; name the tenant to inspect.")
     }
 
     // ------------------------------------------------------------------------------------------
@@ -407,7 +385,7 @@ open class RSocketModelInspectionResponder(
                 )
         val typedId = deserializeEntityId(query.entityId, idClass)
                 ?: throw IllegalArgumentException("Could not deserialize id [${query.entityId}] as [${query.idType}]")
-        val tenant = tenantFor(repository, typedId, query.tenant)
+        val tenant = tenantFor(query.tenant)
 
         // Cache the gate so the inner loop doesn't repeatedly re-read accessMode.
         val includePayload = mayShowPayload()
@@ -479,7 +457,7 @@ open class RSocketModelInspectionResponder(
                 )
         val typedId = deserializeEntityId(query.entityId, idClass)
                 ?: throw IllegalArgumentException("Could not deserialize id [${query.entityId}] as [${query.idType}]")
-        val tenant = tenantFor(repository, typedId, query.tenant)
+        val tenant = tenantFor(query.tenant)
 
         val finalState = try {
             withInspectionUoW(
@@ -521,7 +499,7 @@ open class RSocketModelInspectionResponder(
                 )
         val typedId = deserializeEntityId(query.entityId, idClass)
                 ?: throw IllegalArgumentException("Could not deserialize id [${query.entityId}] as [${query.idType}]")
-        val tenant = tenantFor(repository, typedId, query.tenant)
+        val tenant = tenantFor(query.tenant)
 
         val offset = maxOf(0, query.offset)
         val limit = if (query.limit <= 0) 100 else query.limit
