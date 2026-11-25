@@ -9,6 +9,7 @@
 package io.axoniq.platform.framework.tenancy
 
 import io.axoniq.framework.messaging.multitenancy.eventstreaming.MultiTenantTrackingToken
+import org.axonframework.messaging.eventhandling.processing.streaming.token.ReplayToken
 import org.axonframework.messaging.eventhandling.processing.streaming.token.TrackingToken
 import org.axonframework.messaging.eventhandling.processing.streaming.token.WrappedToken
 
@@ -24,5 +25,11 @@ internal object MultiTenantTokens {
         return tenants.associateWith { tenant ->
             multiTenant.tokenForTenant(tenant)?.position()?.orElse(-1) ?: -1
         }
+    }
+
+    fun resetPositions(token: TrackingToken, tenants: List<String>): Map<String, Long>? {
+        if (!ReplayToken.isReplay(token)) return null
+        val atReset = WrappedToken.unwrap(token, ReplayToken::class.java).orElse(null)?.tokenAtReset ?: return null
+        return positions(atReset, tenants)
     }
 }

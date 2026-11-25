@@ -23,6 +23,8 @@ import org.axonframework.messaging.eventhandling.processing.EventProcessor
 import org.axonframework.messaging.eventhandling.processing.streaming.StreamingEventProcessor
 import org.axonframework.messaging.eventhandling.processing.streaming.pooled.PooledStreamingEventProcessor
 import org.axonframework.messaging.eventhandling.processing.streaming.segmenting.EventTrackerStatus
+import org.axonframework.messaging.eventhandling.processing.streaming.segmenting.TrackerStatus
+import org.axonframework.messaging.eventhandling.processing.streaming.token.TrackingToken
 import org.axonframework.messaging.eventhandling.processing.streaming.token.store.TokenStore
 import org.axonframework.messaging.eventhandling.processing.subscribing.SubscribingEventProcessor
 import org.slf4j.LoggerFactory
@@ -144,7 +146,15 @@ class ProcessorReportCreator @JvmOverloads constructor(
         position = this.currentPosition?.orElse(-1) ?: -1,
         resetPosition = this.resetPosition?.orElse(-1) ?: -1,
         tenantPositions = this.trackingToken?.let { tenancy?.positionsIn(it) },
+        tenantResetPositions = this.replayableToken?.let { tenancy?.resetPositionsIn(it) },
     )
+
+    /**
+     * [EventTrackerStatus.getTrackingToken] unwraps a replay down to its current position, which drops the position
+     * at which the replay was triggered. Only the internal token of a [TrackerStatus] still holds it.
+     */
+    private val EventTrackerStatus.replayableToken: TrackingToken?
+        get() = (this as? TrackerStatus)?.internalTrackingToken ?: this.trackingToken
 
     private fun Any.getField(name: String) =
             this::class.java.declaredFields.firstOrNull { it.name == name } ?: throw NoSuchFieldException(name)

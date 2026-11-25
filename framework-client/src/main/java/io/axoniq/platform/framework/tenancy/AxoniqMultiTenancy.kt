@@ -26,10 +26,16 @@ internal class AxoniqMultiTenancy(private val provider: TenantProvider) : Platfo
         context.putResource(TenantDescriptor.RESOURCE_KEY, TenantDescriptor.tenantWithId(tenantId))
     }
 
-    override fun positionsIn(token: TrackingToken): Map<String, Long>? {
+    override fun positionsIn(token: TrackingToken): Map<String, Long>? =
+            readTokens { MultiTenantTokens.positions(token, tenants()) }
+
+    override fun resetPositionsIn(token: TrackingToken): Map<String, Long>? =
+            readTokens { MultiTenantTokens.resetPositions(token, tenants()) }
+
+    private fun readTokens(read: () -> Map<String, Long>?): Map<String, Long>? {
         if (tokensUnreadable) return null
         return try {
-            MultiTenantTokens.positions(token, tenants())
+            read()
         } catch (e: LinkageError) {
             tokensUnreadable = true
             logger.warn("Cannot read per-tenant positions from this Axoniq Framework version; reporting one position " +

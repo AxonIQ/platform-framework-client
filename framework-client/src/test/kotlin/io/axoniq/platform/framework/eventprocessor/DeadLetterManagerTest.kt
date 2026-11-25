@@ -865,6 +865,7 @@ class DeadLetterManagerTest {
                 context.putResource(tenantKey, tenantId)
             }
             override fun positionsIn(token: TrackingToken): Map<String, Long>? = null
+            override fun resetPositionsIn(token: TrackingToken): Map<String, Long>? = null
         }
         private val evicted = mutableListOf<Pair<String, String>>()
         private val cleared = mutableListOf<String>()
@@ -1332,6 +1333,7 @@ class DeadLetterManagerTest {
                 override fun tenants() = tenants.toList()
                 override fun bind(context: ProcessingContext, tenantId: String) = tenancy.bind(context, tenantId)
                 override fun positionsIn(token: TrackingToken): Map<String, Long>? = null
+                override fun resetPositionsIn(token: TrackingToken): Map<String, Long>? = null
             }
             private val clock = MutableClock()
             private val manager = managerWith(

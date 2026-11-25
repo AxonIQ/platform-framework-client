@@ -17,6 +17,7 @@ import org.axonframework.messaging.eventhandling.processing.EventProcessor
 import org.axonframework.messaging.eventhandling.processing.streaming.pooled.PooledStreamingEventProcessor
 import org.axonframework.messaging.eventhandling.processing.streaming.segmenting.EventTrackerStatus
 import org.axonframework.messaging.eventhandling.processing.streaming.segmenting.Segment
+import org.axonframework.messaging.eventhandling.processing.streaming.segmenting.TrackerStatus
 import org.axonframework.messaging.eventhandling.processing.streaming.token.TrackingToken
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
@@ -92,9 +93,11 @@ class ProcessorReportCreatorTest {
 
         private val token = mockk<TrackingToken>()
 
-        private fun creatorWith(tenancy: PlatformTenancy?): ProcessorReportCreator {
+        private fun creatorWith(
+                tenancy: PlatformTenancy?,
+                status: EventTrackerStatus = mockk<EventTrackerStatus>(relaxed = true),
+        ): ProcessorReportCreator {
             val processor = mockk<PooledStreamingEventProcessor>(relaxed = true)
-            val status = mockk<EventTrackerStatus>(relaxed = true)
             every { status.segment } returns Segment.ROOT_SEGMENT
             every { status.trackingToken } returns token
             every { status.currentPosition } returns OptionalLong.of(5)
@@ -110,11 +113,27 @@ class ProcessorReportCreatorTest {
         fun `reports the position of every tenant next to their sum`() {
             val tenancy = mockk<PlatformTenancy>()
             every { tenancy.positionsIn(token) } returns mapOf("tenant-a" to 2L, "tenant-b" to 3L)
+            every { tenancy.resetPositionsIn(token) } returns null
 
             val segment = creatorWith(tenancy).createReport().processors.single().segments.single()
 
             assertEquals(5L, segment.position)
             assertEquals(mapOf("tenant-a" to 2L, "tenant-b" to 3L), segment.tenantPositions)
+            assertNull(segment.tenantResetPositions)
+        }
+
+        @Test
+        fun `reads the reset position of every tenant from the replay token the status keeps internally`() {
+            val replayToken = mockk<TrackingToken>()
+            val status = mockk<TrackerStatus>(relaxed = true)
+            every { status.internalTrackingToken } returns replayToken
+            val tenancy = mockk<PlatformTenancy>()
+            every { tenancy.positionsIn(token) } returns mapOf("tenant-a" to 2L, "tenant-b" to 3L)
+            every { tenancy.resetPositionsIn(replayToken) } returns mapOf("tenant-a" to 40L, "tenant-b" to 25L)
+
+            val segment = creatorWith(tenancy, status).createReport().processors.single().segments.single()
+
+            assertEquals(mapOf("tenant-a" to 40L, "tenant-b" to 25L), segment.tenantResetPositions)
         }
 
         @Test
@@ -123,6 +142,7 @@ class ProcessorReportCreatorTest {
 
             assertEquals(5L, segment.position)
             assertNull(segment.tenantPositions)
+            assertNull(segment.tenantResetPositions)
         }
     }
 

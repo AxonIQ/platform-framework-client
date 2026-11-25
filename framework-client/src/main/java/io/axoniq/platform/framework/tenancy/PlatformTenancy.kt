@@ -31,6 +31,12 @@ interface PlatformTenancy {
      */
     fun positionsIn(token: TrackingToken): Map<String, Long>?
 
+    /**
+     * The position of every tenant at which the replay in [token] was triggered; -1 for a tenant that had no position
+     * then. Null when [token] is not replaying, is not a multi-tenant token, or cannot be read.
+     */
+    fun resetPositionsIn(token: TrackingToken): Map<String, Long>?
+
     companion object {
         private const val TENANT_PROVIDER_CLASS = "io.axoniq.framework.messaging.multitenancy.api.TenantProvider"
 
