@@ -51,6 +51,7 @@ import java.time.ZoneOffset
 import java.util.Optional
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.function.UnaryOperator
 
 /**
@@ -1235,6 +1236,87 @@ class DeadLetterManagerTest {
                 val info = manager.infoFor("notifier").single()
 
                 assertEquals(0L, info.dlqSizePerTenant?.get("tenant-a"))
+            }
+        }
+
+        @Nested
+        inner class TenantThatFailsToCount {
+
+            private val clock = MutableClock()
+            private val failing = mutableSetOf<String>()
+            private val countsOfTenantB = AtomicInteger()
+            private val dlq = tenantRoutedDlq(mapOf(
+                    "tenant-a" to listOf(listOf(fakeLetter("a1", payload = "acc-1"))),
+                    "tenant-b" to listOf(listOf(fakeLetter("b1", payload = "acc-2")), listOf(fakeLetter("b2", payload = "acc-3"))),
+            )).also { dlq ->
+                val sizes = mapOf("tenant-a" to 1L, "tenant-b" to 2L)
+                every { dlq.amountOfSequences(any()) } answers {
+                    val tenant = tenantOf(firstArg())
+                    if (tenant == "tenant-b") countsOfTenantB.incrementAndGet()
+                    if (tenant in failing) {
+                        CompletableFuture.failedFuture(IllegalStateException("tenant database unreachable"))
+                    } else {
+                        CompletableFuture.completedFuture(sizes.getValue(tenant))
+                    }
+                }
+            }
+            private val manager = managerWith(queue to dlq, ehc = accountPolicy(), tenancy = tenancy, clock = clock)
+
+            @Test
+            fun `reports the other tenants and leaves out a tenant it never counted`() {
+                failing += "tenant-b"
+
+                val info = manager.infoFor("notifier").single()
+
+                assertEquals(mapOf("tenant-a" to 1L), info.dlqSizePerTenant)
+                assertEquals(1, info.dlqSize)
+            }
+
+            @Test
+            fun `keeps the last known size of a tenant that stops counting`() {
+                manager.infoFor("notifier")
+                failing += "tenant-b"
+                clock.now = clock.now.plusSeconds(30)
+
+                val info = manager.infoFor("notifier").single()
+
+                assertEquals(mapOf("tenant-a" to 1L, "tenant-b" to 2L), info.dlqSizePerTenant)
+            }
+
+            @Test
+            fun `keeps the last known size after a mutation dropped the cache`() {
+                manager.infoFor("notifier")
+                failing += "tenant-b"
+
+                manager.delete("notifier", "acc-1", tenant = "tenant-a")
+                val info = manager.infoFor("notifier").single()
+
+                assertEquals(2L, info.dlqSizePerTenant?.get("tenant-b"))
+            }
+
+            @Test
+            fun `asks a failing tenant again only once the TTL has passed`() {
+                failing += "tenant-b"
+                manager.infoFor("notifier")
+                clock.now = clock.now.plusSeconds(29)
+                manager.infoFor("notifier")
+
+                assertEquals(1, countsOfTenantB.get())
+
+                clock.now = clock.now.plusSeconds(1)
+                manager.infoFor("notifier")
+
+                assertEquals(2, countsOfTenantB.get())
+            }
+
+            @Test
+            fun `lists the dead letters of the tenants that still count`() {
+                failing += "tenant-b"
+
+                val response = manager.deadLetters("notifier")
+
+                assertEquals(1, response.totalCount)
+                assertEquals(listOf("a1"), response.sequences.map { it.single().messageIdentifier })
             }
         }
 

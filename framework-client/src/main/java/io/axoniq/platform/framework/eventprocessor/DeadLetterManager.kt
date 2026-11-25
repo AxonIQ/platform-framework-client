@@ -235,7 +235,7 @@ class DeadLetterManager @JvmOverloads constructor(
         val (counts, page) = tenantSizes.peek(entry.processingGroup)
                 ?.takeIf { it.keys == tenants.toSet() }
                 ?.let { cached -> loadPage(entry, cached, offset, size).takeIf { it.matches(cached) }?.let { cached to it } }
-                ?: tenantSizes.refresh(entry.processingGroup) { tenants.associateWith { amountOfSequences(entry, it) } }
+                ?: tenantSizes.refresh(entry.processingGroup) { lastKnown -> countPerTenant(entry, tenants, lastKnown) }
                         .let { fresh -> fresh to loadPage(entry, fresh, offset, size) }
         val pageOfSequences = page.flatMap { (slice, sequences) ->
             sequences.drop(slice.skip).take(slice.take).toApiSequences(entry, slice.tenant, maxSequenceLetters)
@@ -646,8 +646,8 @@ class DeadLetterManager @JvmOverloads constructor(
                     .filter { it.processorName == processorName }
                     .map { entry ->
                         val perTenant = tenancy?.let { t ->
-                            tenantSizes.get(entry.processingGroup) {
-                                t.tenants().associateWith { amountOfSequences(entry, it) }
+                            tenantSizes.get(entry.processingGroup) { lastKnown ->
+                                countPerTenant(entry, t.tenants(), lastKnown)
                             }
                         }
                         DlqInfo(
@@ -656,6 +656,28 @@ class DeadLetterManager @JvmOverloads constructor(
                                 sequenceCountPerTenant = perTenant,
                         )
                     }
+
+    /**
+     * Counts each tenant on its own, so one tenant whose queue cannot be read does not take the sizes of the others
+     * with it. That tenant keeps its last known size, or is left out when it never had one. The result is cached like
+     * any count, so a failing tenant is asked again once per TTL instead of on every 2-second report.
+     */
+    private fun countPerTenant(entry: DlqEntry, tenants: List<String>, lastKnown: Map<String, Long>?): Map<String, Long> =
+            tenants.mapNotNull { tenant ->
+                try {
+                    tenant to amountOfSequences(entry, tenant)
+                } catch (e: Exception) {
+                    val size = lastKnown?.get(tenant)
+                    logger.warn(
+                            "Could not count the dead letters of tenant [{}] in processing group [{}], {}.",
+                            tenant,
+                            entry.processingGroup,
+                            if (size != null) "reporting its last known size of $size" else "leaving it out of the report",
+                            e,
+                    )
+                    size?.let { tenant to it }
+                }
+            }.toMap()
 
     private fun dlqFor(processingGroup: String): DlqEntry =
             discover().firstOrNull { it.processingGroup == processingGroup }
@@ -893,7 +915,8 @@ class DeadLetterManager @JvmOverloads constructor(
 
 /**
  * Per processing group sizes, with an invalidation generation so a count that was running while a mutation
- * invalidated the group is returned but not stored.
+ * invalidated the group is returned but not stored. An invalidated or expired entry is no longer served, but its
+ * sizes stay available to the next count as the last known sizes of tenants that fail to count.
  */
 private class TenantSizeCache(private val clock: Clock, private val ttl: Duration) {
 
@@ -902,16 +925,16 @@ private class TenantSizeCache(private val clock: Clock, private val ttl: Duratio
     private val entries = ConcurrentHashMap<String, Entry>()
     private val generation = AtomicLong()
 
-    fun get(processingGroup: String, count: () -> Map<String, Long>): Map<String, Long> =
+    fun get(processingGroup: String, count: (lastKnown: Map<String, Long>?) -> Map<String, Long>): Map<String, Long> =
             peek(processingGroup) ?: refresh(processingGroup, count)
 
     fun peek(processingGroup: String): Map<String, Long>? =
             entries[processingGroup]?.takeIf { clock.instant().isBefore(it.expiresAt) }?.sizes
 
-    fun refresh(processingGroup: String, count: () -> Map<String, Long>): Map<String, Long> {
+    fun refresh(processingGroup: String, count: (lastKnown: Map<String, Long>?) -> Map<String, Long>): Map<String, Long> {
         val now = clock.instant()
         val startedAt = generation.get()
-        val sizes = count()
+        val sizes = count(entries[processingGroup]?.sizes)
         entries.compute(processingGroup) { _, current ->
             if (generation.get() == startedAt) Entry(sizes = sizes, expiresAt = now.plus(ttl)) else current
         }
@@ -919,9 +942,9 @@ private class TenantSizeCache(private val clock: Clock, private val ttl: Duratio
     }
 
     fun invalidate(processingGroup: String) {
-        entries.compute(processingGroup) { _, _ ->
+        entries.compute(processingGroup) { _, current ->
             generation.incrementAndGet()
-            null
+            current?.copy(expiresAt = Instant.MIN)
         }
     }
 }
