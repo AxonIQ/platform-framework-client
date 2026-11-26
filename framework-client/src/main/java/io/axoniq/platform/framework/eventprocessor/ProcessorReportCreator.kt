@@ -15,6 +15,7 @@ import io.axoniq.platform.framework.api.ProcessorStatusReport
 import io.axoniq.platform.framework.api.SegmentDetails
 import io.axoniq.platform.framework.api.SegmentOverview
 import io.axoniq.platform.framework.api.SegmentStatus
+import io.axoniq.platform.framework.tenancy.PlatformTenancy
 import org.axonframework.common.ReflectionUtils.getFieldValue
 import org.axonframework.common.configuration.Configuration
 import org.axonframework.messaging.core.unitofwork.UnitOfWorkFactory
@@ -22,21 +23,24 @@ import org.axonframework.messaging.eventhandling.processing.EventProcessor
 import org.axonframework.messaging.eventhandling.processing.streaming.StreamingEventProcessor
 import org.axonframework.messaging.eventhandling.processing.streaming.pooled.PooledStreamingEventProcessor
 import org.axonframework.messaging.eventhandling.processing.streaming.segmenting.EventTrackerStatus
+import org.axonframework.messaging.eventhandling.processing.streaming.segmenting.TrackerStatus
+import org.axonframework.messaging.eventhandling.processing.streaming.token.TrackingToken
 import org.axonframework.messaging.eventhandling.processing.streaming.token.store.TokenStore
 import org.axonframework.messaging.eventhandling.processing.subscribing.SubscribingEventProcessor
 import org.slf4j.LoggerFactory
 
-class ProcessorReportCreator(private val processingConfig: Configuration) {
+class ProcessorReportCreator @JvmOverloads constructor(
+        private val processingConfig: Configuration,
+        tenancyOf: (Configuration) -> PlatformTenancy? = PlatformTenancy::of,
+) {
     private val logger = LoggerFactory.getLogger(ProcessorReportCreator::class.java)
     private val metricsRegistry = processingConfig.getComponent(ProcessorMetricsRegistry::class.java)
     // Optional — only present when an addon (currently only axoniq-dead-letter) registers a source.
     private val processingGroupInfoSource: ProcessingGroupInfoSource? =
             processingConfig.getOptionalComponent(ProcessingGroupInfoSource::class.java).orElse(null)
+    private val tenancy: PlatformTenancy? = tenancyOf(processingConfig)
     private val unitOfWorkFactory: UnitOfWorkFactory by lazy {
         processingConfig.getComponent(UnitOfWorkFactory::class.java)
-    }
-    companion object {
-        const val MULTI_TENANT_PROCESSOR_CLASS = "org.axonframework.extensions.multitenancy.components.eventhandeling.MultiTenantEventProcessor"
     }
 
     fun createReport() = ProcessorStatusReport(
@@ -45,7 +49,7 @@ class ProcessorReportCreator(private val processingConfig: Configuration) {
                 when (val processor = entry.value) {
                     is StreamingEventProcessor -> listOf(streamingStatus(entry.key, processor))
                     is SubscribingEventProcessor -> listOf(subscribingStatus(entry.key, processor))
-                    else -> ignoreMultiTenantProcessorOrDefault(entry.key, processor)
+                    else -> listOf(defaultStatus(entry.key, processor))
                 }
             }
     )
@@ -67,7 +71,7 @@ class ProcessorReportCreator(private val processingConfig: Configuration) {
         val source = processingGroupInfoSource ?: return emptyList()
         return try {
             source.infoFor(processorName)
-                    .map { ProcessingGroupStatus(it.processingGroup, it.dlqSize) }
+                    .map { ProcessingGroupStatus(it.processingGroup, it.dlqSize, it.dlqSizePerTenant) }
         } catch (e: Exception) {
             // A failing probe must not break processor reporting.
             logger.warn("Failed to collect processing group information for processor [{}]", processorName, e)
@@ -106,16 +110,6 @@ class ProcessorReportCreator(private val processingConfig: Configuration) {
     }
 
 
-    /**
-     * In the case of the multi tenant event processor, they are also registered individually. So we can ignore the
-     * combining event processor containing a map which each individual tenant.
-     */
-    private fun ignoreMultiTenantProcessorOrDefault(name: String, processor: EventProcessor): List<ProcessorStatus> {
-        return if (processor.javaClass.name == MULTI_TENANT_PROCESSOR_CLASS) {
-            emptyList()
-        } else listOf(defaultStatus(name, processor))
-    }
-
     fun createSegmentOverview(processorName: String): SegmentOverview {
         val processor = processingConfig.getComponents(StreamingEventProcessor::class.java).values.first { it.name() == processorName }
         val tokenStore = processor.tokenStore()
@@ -151,7 +145,16 @@ class ProcessorReportCreator(private val processingConfig: Configuration) {
             ?: -1.0,
         position = this.currentPosition?.orElse(-1) ?: -1,
         resetPosition = this.resetPosition?.orElse(-1) ?: -1,
+        tenantPositions = this.trackingToken?.let { tenancy?.positionsIn(it) },
+        tenantResetPositions = this.replayableToken?.let { tenancy?.resetPositionsIn(it) },
     )
+
+    /**
+     * [EventTrackerStatus.getTrackingToken] unwraps a replay down to its current position, which drops the position
+     * at which the replay was triggered. Only the internal token of a [TrackerStatus] still holds it.
+     */
+    private val EventTrackerStatus.replayableToken: TrackingToken?
+        get() = (this as? TrackerStatus)?.internalTrackingToken ?: this.trackingToken
 
     private fun Any.getField(name: String) =
             this::class.java.declaredFields.firstOrNull { it.name == name } ?: throw NoSuchFieldException(name)

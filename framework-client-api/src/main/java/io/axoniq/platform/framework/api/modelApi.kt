@@ -9,7 +9,9 @@
 package io.axoniq.platform.framework.api
 
 data class RegisteredEntitiesResult(
-        val entities: List<RegisteredEntityInfo>
+        val entities: List<RegisteredEntityInfo>,
+        /** Tenants of a multi-tenant application, every query on its entities names one. Empty otherwise. */
+        val tenants: List<String> = emptyList(),
 )
 
 data class RegisteredEntityInfo(
@@ -51,6 +53,8 @@ data class ModelDomainEventsQuery(
         val idType: String,
         val page: Int = 0,
         val pageSize: Int = 10,
+        /** Tenant of a multi-tenant application, which rejects a query without one. Ignored otherwise. */
+        val tenant: String? = null,
 )
 
 data class ModelEntityStateAtSequenceQuery(
@@ -59,6 +63,8 @@ data class ModelEntityStateAtSequenceQuery(
         /** FQ Java type name of the id type the user selected. */
         val idType: String,
         val maxSequenceNumber: Long = 0,
+        /** Tenant of a multi-tenant application, which rejects a query without one. Ignored otherwise. */
+        val tenant: String? = null,
 )
 
 data class ModelTimelineQuery(
@@ -68,6 +74,8 @@ data class ModelTimelineQuery(
         val idType: String,
         val offset: Int = 0,
         val limit: Int = 100,
+        /** Tenant of a multi-tenant application, which rejects a query without one. Ignored otherwise. */
+        val tenant: String? = null,
 )
 
 data class ModelTimelineResult(

@@ -15,6 +15,7 @@ import com.fasterxml.jackson.databind.SerializationFeature
 import io.axoniq.platform.framework.AxoniqPlatformConfiguration
 import io.axoniq.platform.framework.api.*
 import io.axoniq.platform.framework.client.RSocketHandlerRegistrar
+import io.axoniq.platform.framework.tenancy.PlatformTenancy
 import io.axoniq.platform.framework.truncateToBytes
 import org.axonframework.common.configuration.Configuration
 import org.axonframework.eventsourcing.eventstore.EventStorageEngine
@@ -29,10 +30,11 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.function.BiConsumer
 import kotlin.jvm.optionals.getOrNull
 
-open class RSocketModelInspectionResponder(
+open class RSocketModelInspectionResponder @JvmOverloads constructor(
         @Suppress("unused") private val eventStorageEngine: EventStorageEngine,
         private val registrar: RSocketHandlerRegistrar,
         private val configuration: Configuration,
+        private val tenancyOf: (Configuration) -> PlatformTenancy? = PlatformTenancy::of,
 ) {
     private val logger = LoggerFactory.getLogger(this::class.java)
 
@@ -50,6 +52,9 @@ open class RSocketModelInspectionResponder(
     private val unitOfWorkFactory: UnitOfWorkFactory by lazy {
         configuration.getComponent(UnitOfWorkFactory::class.java)
     }
+
+    /** Null when the application is not multi-tenant; otherwise every load needs a tenant on its context. */
+    private val tenancy: PlatformTenancy? by lazy { tenancyOf(configuration) }
 
     /**
      * Privacy gate read once at first access, sourced directly from [AxoniqPlatformConfiguration]
@@ -142,7 +147,7 @@ open class RSocketModelInspectionResponder(
             )
         }
         logger.debug("Found entities: {}", entities)
-        return RegisteredEntitiesResult(entities = entities)
+        return RegisteredEntitiesResult(entities = entities, tenants = tenancy?.tenants() ?: emptyList())
     }
 
     /**
@@ -285,9 +290,11 @@ open class RSocketModelInspectionResponder(
             beforeConsumer: BiConsumer<EventMessage, Any?>? = null,
             afterConsumer: BiConsumer<EventMessage, Any?>? = null,
             maxIndex: Long? = null,
+            tenant: String? = null,
             extract: (entity: Any?) -> R,
     ): R {
         return unitOfWorkFactory.create().executeWithResult { ctx: ProcessingContext ->
+            tenant?.let { tenancy?.bind(ctx, it) }
             beforeConsumer?.let { ctx.putResource(AxoniqPlatformEntityEvolver.BEFORE_CONSUMER, it) }
             afterConsumer?.let { ctx.putResource(AxoniqPlatformEntityEvolver.AFTER_CONSUMER, it) }
             maxIndex?.let { ctx.putResource(AxoniqPlatformEntityEvolver.MAX_INDEX, it) }
@@ -296,6 +303,15 @@ open class RSocketModelInspectionResponder(
                 extract(managed?.entity())
             }
         }.get()
+    }
+
+    /**
+     * An entity id is only unique per tenant, so a multi-tenant application needs the tenant named: finding it would
+     * mean sourcing the entity in every tenant.
+     */
+    private fun tenantFor(requested: String?): String? {
+        if (tenancy == null) return null
+        return requested ?: throw IllegalArgumentException("The application is multi-tenant; name the tenant to inspect.")
     }
 
     // ------------------------------------------------------------------------------------------
@@ -369,6 +385,7 @@ open class RSocketModelInspectionResponder(
                 )
         val typedId = deserializeEntityId(query.entityId, idClass)
                 ?: throw IllegalArgumentException("Could not deserialize id [${query.entityId}] as [${query.idType}]")
+        val tenant = tenantFor(query.tenant)
 
         // Cache the gate so the inner loop doesn't repeatedly re-read accessMode.
         val includePayload = mayShowPayload()
@@ -378,6 +395,7 @@ open class RSocketModelInspectionResponder(
             withInspectionUoW(
                     repository = repository,
                     typedId = typedId,
+                    tenant = tenant,
                     beforeConsumer = { event, _ ->
                         collected += DomainEvent(
                                 sequenceNumber = collected.size.toLong(),
@@ -439,6 +457,7 @@ open class RSocketModelInspectionResponder(
                 )
         val typedId = deserializeEntityId(query.entityId, idClass)
                 ?: throw IllegalArgumentException("Could not deserialize id [${query.entityId}] as [${query.idType}]")
+        val tenant = tenantFor(query.tenant)
 
         val finalState = try {
             withInspectionUoW(
@@ -446,6 +465,7 @@ open class RSocketModelInspectionResponder(
                     typedId = typedId,
                     // Negative sequence = "all events" — don't set MAX_INDEX so nothing is skipped.
                     maxIndex = if (query.maxSequenceNumber < 0) null else query.maxSequenceNumber,
+                    tenant = tenant,
                     extract = { entity -> entity },
             )
         } catch (e: Exception) {
@@ -479,6 +499,7 @@ open class RSocketModelInspectionResponder(
                 )
         val typedId = deserializeEntityId(query.entityId, idClass)
                 ?: throw IllegalArgumentException("Could not deserialize id [${query.entityId}] as [${query.idType}]")
+        val tenant = tenantFor(query.tenant)
 
         val offset = maxOf(0, query.offset)
         val limit = if (query.limit <= 0) 100 else query.limit
@@ -508,6 +529,7 @@ open class RSocketModelInspectionResponder(
             withInspectionUoW(
                     repository = repository,
                     typedId = typedId,
+                    tenant = tenant,
                     beforeConsumer = { event, stateBefore ->
                         pending[0] = event
                         // Only do the (potentially expensive) state serialization when the
